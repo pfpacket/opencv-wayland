@@ -477,6 +477,7 @@ int cv::createButton(const String&, ButtonCallback, void*, int , bool )
 
 #if   defined(HAVE_WIN32UI)   // see window_w32.cpp
 #elif defined (HAVE_GTK)      // see window_gtk.cpp
+#elif defined (HAVE_WAYLAND)  // see window_wayland.cpp
 #elif defined (HAVE_COCOA)    // see window_carbon.cpp
 #elif defined (HAVE_CARBON)
 #elif defined (HAVE_QT)       //YV see window_QT.cpp

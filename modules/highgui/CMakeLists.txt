@@ -70,6 +70,9 @@ elseif(HAVE_WIN32UI)
   list(APPEND highgui_srcs ${CMAKE_CURRENT_LIST_DIR}/src/window_w32.cpp)
 elseif(HAVE_GTK OR HAVE_GTK3)
   list(APPEND highgui_srcs ${CMAKE_CURRENT_LIST_DIR}/src/window_gtk.cpp)
+elseif(HAVE_WAYLAND)
+  list(APPEND highgui_srcs ${CMAKE_CURRENT_LIST_DIR}/src/window_wayland.cpp)
+  set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/src/window_wayland.cpp PROPERTIES COMPILE_FLAGS "-std=c++11 -Wno-unused-parameter")
 elseif(HAVE_CARBON)
   list(APPEND highgui_srcs ${CMAKE_CURRENT_LIST_DIR}/src/window_carbon.cpp)
   list(APPEND HIGHGUI_LIBRARIES "-framework Carbon" "-framework QuickTime")
@@ -77,6 +80,7 @@ elseif(HAVE_COCOA)
   list(APPEND highgui_srcs ${CMAKE_CURRENT_LIST_DIR}/src/window_cocoa.mm)
   list(APPEND HIGHGUI_LIBRARIES "-framework Cocoa")
 endif()
+
 
 if(UNIX)
   #these variables are set by CHECK_MODULE macro
