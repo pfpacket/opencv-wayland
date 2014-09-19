@@ -63,6 +63,15 @@ if(WITH_GTK AND NOT HAVE_QT)
   endif()
 endif()
 
+# --- Wayland ---
+ocv_clear_vars(HAVE_WAYLAND)
+if(WITH_WAYLAND AND NOT HAVE_QT AND NOT HAVE_GTK)
+  CHECK_MODULE(wayland-client HAVE_WAYLAND_CLIENT)
+  if(HAVE_WAYLAND_CLIENT)
+      set(HAVE_WAYLAND TRUE)
+  endif()
+endif()
+
 # --- OpenGl ---
 ocv_clear_vars(HAVE_OPENGL HAVE_QT_OPENGL)
 if(WITH_OPENGL)
