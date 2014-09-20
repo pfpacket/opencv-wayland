@@ -69,6 +69,7 @@ class cv_wl_display {
 public:
     cv_wl_display();
     cv_wl_display(std::string const& disp);
+    ~cv_wl_display();
 
     int dispatch();
     int roundtrip();
@@ -80,19 +81,83 @@ public:
 private:
     struct wl_display *display_;
     struct wl_registry *registry_;
-    struct wl_registry_listener reglistener_{&handle_reg_global, nullptr};
+    struct wl_registry_listener reglistener_{&handle_reg_global, &handle_reg_remove};
     struct wl_compositor *compositor_ = nullptr;
     struct wl_shm *shm_ = nullptr;
     struct wl_shm_listener shmlistener_{&handle_shm_format};
     struct xdg_shell *shell_ = nullptr;
     struct xdg_shell_listener shell_listener_{&handle_shell_ping};
+    struct wl_seat *seat_ = nullptr;
+    struct wl_seat_listener seat_listener_{&handle_seat_capabilities, &handle_seat_name};
+    struct wl_keyboard *keyboard_ = nullptr;
+    struct wl_keyboard_listener keyboard_listener_{
+        &handle_kb_keymap, &handle_kb_enter, &handle_kb_leave,
+        &handle_kb_key, &handle_kb_modifiers, &handle_kb_repeat
+    };
     uint32_t formats_ = 0;
 
     void init();
     static void handle_reg_global(void *data, struct wl_registry *reg, uint32_t name, const char *iface, uint32_t version);
+    static void handle_reg_remove(void *data, struct wl_registry *wl_registry, uint32_t name);
     static void handle_shm_format(void *data, struct wl_shm *wl_shm, uint32_t format);
     static void handle_shell_ping(void *data, struct xdg_shell *shell, uint32_t serial);
+    static void handle_seat_capabilities(void *data, struct wl_seat *wl_seat, uint32_t capabilities);
+    static void handle_seat_name(void *data, struct wl_seat *wl_seat, const char *name);
+    static void handle_kb_keymap(void *data, struct wl_keyboard *keyboard, uint32_t format, int fd, uint32_t size);
+    static void handle_kb_enter(void *data, struct wl_keyboard *keyboard, uint32_t serial, struct wl_surface *surface, struct wl_array *keys);
+    static void handle_kb_leave(void *data, struct wl_keyboard *keyboard, uint32_t serial, struct wl_surface *surface);
+    static void handle_kb_key(void *data, struct wl_keyboard *keyboard, uint32_t serial, uint32_t time, uint32_t key, uint32_t state);
+    static void handle_kb_modifiers(void *data, struct wl_keyboard *keyboard,
+        uint32_t serial, uint32_t mods_depressed, uint32_t mods_latched, uint32_t mods_locked, uint32_t group);
+    static void handle_kb_repeat(void *data, struct wl_keyboard *wl_keyboard, int32_t rate, int32_t delay);
 };
+
+void cv_wl_display::handle_seat_capabilities(void *data, struct wl_seat *wl_seat, uint32_t caps)
+{
+    auto *display = reinterpret_cast<cv_wl_display *>(data);
+
+    if (caps & WL_SEAT_CAPABILITY_KEYBOARD) {
+        std::cerr << BACKEND_NAME << ": seat cap: keyboard available" << std::endl;
+        display->keyboard_ = wl_seat_get_keyboard(display->seat_);
+        wl_keyboard_add_listener(display->keyboard_, &display->keyboard_listener_, display);
+    }
+}
+
+void cv_wl_display::handle_seat_name(void *data, struct wl_seat *wl_seat, const char *name)
+{
+}
+
+void cv_wl_display::handle_kb_keymap(void *data, struct wl_keyboard *keyboard, uint32_t format, int fd, uint32_t size)
+{
+}
+
+void cv_wl_display::handle_kb_enter(void *data, struct wl_keyboard *keyboard, uint32_t serial, struct wl_surface *surface, struct wl_array *keys)
+{
+}
+
+void cv_wl_display::handle_kb_leave(void *data, struct wl_keyboard *keyboard, uint32_t serial, struct wl_surface *surface)
+{
+}
+
+void cv_wl_display::handle_kb_key(void *data, struct wl_keyboard *keyboard, uint32_t serial, uint32_t time, uint32_t key, uint32_t state)
+{
+    fprintf(stderr, "Key is %d state is %d\n", key, state);
+    if (key == KEY_ESC && state == 0) {
+    }
+}
+
+void cv_wl_display::handle_kb_modifiers(void *data, struct wl_keyboard *keyboard,
+                        uint32_t serial, uint32_t mods_depressed,
+                        uint32_t mods_latched, uint32_t mods_locked,
+                        uint32_t group)
+{
+    fprintf(stderr, "Modifiers depressed %d, latched %d, locked %d, group %d\n",
+        mods_depressed, mods_latched, mods_locked, group);
+}
+
+void cv_wl_display::handle_kb_repeat(void *data, struct wl_keyboard *wl_keyboard, int32_t rate, int32_t delay)
+{
+}
 
 class cv_wl_buffer {
 private:
@@ -122,6 +187,7 @@ public:
 
     cv_wl_window(shared_ptr<cv_wl_display> display, std::string const& name, int flags);
     cv_wl_window(shared_ptr<cv_wl_display> display, std::string const& name, int width, int height, int flags);
+    ~cv_wl_window();
 
     std::string const& name() const;
     std::pair<int, int> get_size() const;
@@ -150,6 +216,7 @@ private:
 class cv_wl_core {
 public:
     cv_wl_core();
+    ~cv_wl_core();
 
     shared_ptr<cv_wl_display> display();
     shared_ptr<cv_wl_window> get_window(std::string const& name);
@@ -179,6 +246,18 @@ cv_wl_display::cv_wl_display(std::string const& disp)
     :   display_{wl_display_connect(disp.c_str())}
 {
     init();
+}
+
+cv_wl_display::~cv_wl_display()
+{
+    wl_shm_destroy(shm_);
+    xdg_shell_destroy(shell_);
+    wl_compositor_destroy(compositor_);
+    wl_registry_destroy(registry_);
+    wl_display_flush(display_);
+    wl_display_disconnect(display_);
+
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
 int cv_wl_display::dispatch()
@@ -245,7 +324,15 @@ void cv_wl_display::handle_reg_global(void *data, struct wl_registry *reg, uint3
             wl_registry_bind(reg, name, &xdg_shell_interface, version);
         xdg_shell_use_unstable_version(display->shell_, XDG_SHELL_VERSION_CURRENT);
         xdg_shell_add_listener(display->shell_, &display->shell_listener_, display);
+    } else if (interface == "wl_seat") {
+        display->seat_ = (struct wl_seat *)
+            wl_registry_bind(reg, name, &wl_seat_interface, version);
+        wl_seat_add_listener(display->seat_, &display->seat_listener_, display);
     }
+}
+
+void cv_wl_display::handle_reg_remove(void *data, struct wl_registry *wl_registry, uint32_t name)
+{
 }
 
 void cv_wl_display::handle_shm_format(void *data, struct wl_shm *wl_shm, uint32_t format)
@@ -263,12 +350,12 @@ void cv_wl_display::handle_shell_ping(void *data, struct xdg_shell *shell, uint3
 /*
  * cv_wl_buffer implementation
  */
+int cv_wl_buffer::number_ = 0;
+
 cv_wl_buffer::~cv_wl_buffer()
 {
     this->destroy();
 }
-
-int cv_wl_buffer::number_ = 0;
 
 void cv_wl_buffer::handle_buffer_release(void *data, struct wl_buffer *buffer)
 {
@@ -331,6 +418,17 @@ cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> display,
     shell_surface_ = display->get_shell_surface(surface_);
     xdg_surface_add_listener(shell_surface_, &surface_listener_, this);
     xdg_surface_set_title(shell_surface_, name_.c_str());
+
+    wl_surface_set_user_data(surface_, this);
+}
+
+cv_wl_window::~cv_wl_window()
+{
+    for (auto&& buffer : buffers_)
+        buffer.destroy();
+    xdg_surface_destroy(shell_surface_);
+    wl_surface_destroy(surface_);
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
 std::string const& cv_wl_window::name() const
@@ -404,6 +502,11 @@ cv_wl_core::cv_wl_core()
 {
     if (!display_)
         throw std::runtime_error("Could not create display");
+}
+
+cv_wl_core::~cv_wl_core()
+{
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
 shared_ptr<cv_wl_display> cv_wl_core::display()
