@@ -37,13 +37,11 @@
 #define BACKEND_NAME "[DEBUG] OpenCV Wayland"
 
 #define DEBUG_PRINT_LOCATION_INFO \
-    std::cout << BACKEND_NAME << ": " << __func__ << ": " << __FILE__ << ":" << __LINE__ << " passed" << std::endl
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": " << __FILE__ << ":" << __LINE__ << " passed" << std::endl
 
 /*                              */
 /*  OpenCV highgui internals    */
 /*                              */
-using std::shared_ptr;
-
 class cv_wl_display;
 class cv_wl_input;
 class cv_wl_keyboard;
@@ -51,12 +49,28 @@ class cv_wl_buffer;
 class cv_wl_window;
 class cv_wl_core;
 
+using std::shared_ptr;
 extern shared_ptr<cv_wl_core> g_core;
-
 
 static void throw_system_error(std::string const& errmsg, int err)
 {
     throw std::system_error(err, std::system_category(), errmsg);
+}
+
+static int xkb_keysym_to_ascii(xkb_keysym_t keysym)
+{
+    /* Remove most significant 8 bytes (0xff00) */
+    return static_cast<uint8_t>(keysym);
+}
+
+/*
+ * From /usr/include/wayland-client-protocol.h
+ * @WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1: libxkbcommon compatible; to
+ *	determine the xkb keycode, clients must add 8 to the key event keycode
+ */
+static xkb_keycode_t xkb_keycode_from_raw_keycode(int raw_keycode)
+{
+    return raw_keycode + 8;
 }
 
 static void draw_argb8888(void *d, uint8_t a, uint8_t r, uint8_t g, uint8_t b)
@@ -66,8 +80,7 @@ static void draw_argb8888(void *d, uint8_t a, uint8_t r, uint8_t g, uint8_t b)
 
 static void write_mat_to_xrgb8888(CvMat const *mat, void *data)
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": image: " << mat->cols << "x" << mat->rows << " step=" << mat->step << std::endl;
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": writing to shm buffer" << std::endl;
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": writing image: " << mat->cols << "x" << mat->rows << " step=" << mat->step << std::endl;
     int x, y;
     for (y = 0; y < mat->rows; y++) {
         for (x = 0; x < mat->cols; x++) {
@@ -89,13 +102,13 @@ public:
 
     int dispatch();
     int dispatch_pending();
+    int flush();
     int roundtrip();
     struct wl_shm *shm();
+    struct wl_seat *seat();
     uint32_t formats() const;
     struct wl_surface *get_surface();
     struct xdg_surface *get_shell_surface(struct wl_surface *surface);
-
-    int wait_key(int delay);
 
 private:
     struct wl_display *display_;
@@ -106,8 +119,8 @@ private:
     struct wl_shm_listener shmlistener_{&handle_shm_format};
     struct xdg_shell *shell_ = nullptr;
     struct xdg_shell_listener shell_listener_{&handle_shell_ping};
+    struct wl_seat *seat_ = nullptr;
     uint32_t formats_ = 0;
-    shared_ptr<cv_wl_input> input_;
 
     void init();
     static void handle_reg_global(void *data, struct wl_registry *reg, uint32_t name, const char *iface, uint32_t version);
@@ -225,7 +238,10 @@ public:
     cv_wl_core();
     ~cv_wl_core();
 
+    void init();
+
     shared_ptr<cv_wl_display> display();
+    shared_ptr<cv_wl_input> input();
     shared_ptr<cv_wl_window> get_window(std::string const& name);
     void *get_window_handle(std::string const& name);
     std::string const& get_window_name(void *handle);
@@ -235,6 +251,7 @@ public:
 
 private:
     shared_ptr<cv_wl_display> display_;
+    shared_ptr<cv_wl_input> input_;
     std::map<std::string, shared_ptr<cv_wl_window>> windows_;
     std::map<void *, std::string> handles_;
 };
@@ -258,7 +275,6 @@ cv_wl_display::cv_wl_display(std::string const& disp)
 
 cv_wl_display::~cv_wl_display()
 {
-    input_.reset();
     wl_shm_destroy(shm_);
     xdg_shell_destroy(shell_);
     wl_compositor_destroy(compositor_);
@@ -278,6 +294,11 @@ int cv_wl_display::dispatch_pending()
     return wl_display_dispatch_pending(display_);
 }
 
+int cv_wl_display::flush()
+{
+    return wl_display_flush(display_);
+}
+
 int cv_wl_display::roundtrip()
 {
     return wl_display_roundtrip(display_);
@@ -286,6 +307,11 @@ int cv_wl_display::roundtrip()
 struct wl_shm *cv_wl_display::shm()
 {
     return shm_;
+}
+
+struct wl_seat *cv_wl_display::seat()
+{
+    return seat_;
 }
 
 uint32_t cv_wl_display::formats() const
@@ -303,11 +329,6 @@ struct xdg_surface *cv_wl_display::get_shell_surface(struct wl_surface *surface)
     return xdg_shell_get_xdg_surface(shell_, surface);
 }
 
-int cv_wl_display::wait_key(int delay)
-{
-    return input_->keyboard()->wait_key(delay);
-}
-
 void cv_wl_display::init()
 {
     if (!display_)
@@ -316,11 +337,10 @@ void cv_wl_display::init()
     registry_ = wl_display_get_registry(display_);
     wl_registry_add_listener(registry_, &reglistener_, this);
     wl_display_roundtrip(display_);
-    if (!compositor_ || !shm_ || !shell_)
+    if (!compositor_ || !shm_ || !shell_ || !seat_)
         throw std::runtime_error("Compositor doesn't have required interfaces");
 
     wl_display_roundtrip(display_);
-
     if (!(formats_ & (1 << WL_SHM_FORMAT_XRGB8888)))
         throw std::runtime_error("WL_SHM_FORMAT_XRGB32 not available");
 }
@@ -343,9 +363,8 @@ void cv_wl_display::handle_reg_global(void *data, struct wl_registry *reg, uint3
         xdg_shell_use_unstable_version(display->shell_, XDG_SHELL_VERSION_CURRENT);
         xdg_shell_add_listener(display->shell_, &display->shell_listener_, display);
     } else if (interface == "wl_seat") {
-        struct wl_seat *seat = (struct wl_seat *)
+        display->seat_ = (struct wl_seat *)
             wl_registry_bind(reg, name, &wl_seat_interface, version);
-        display->input_ = std::make_shared<cv_wl_input>(seat);
     }
 }
 
@@ -375,11 +394,11 @@ cv_wl_keyboard::cv_wl_keyboard(struct wl_keyboard *keyboard)
     xkb_.ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     if (!xkb_.ctx)
         throw std::runtime_error("Failed to create xkb context");
+    g_core->display()->roundtrip();
 }
 
 cv_wl_keyboard::~cv_wl_keyboard()
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
     if (xkb_.state)
         xkb_state_unref(xkb_.state);
     if (xkb_.keymap)
@@ -422,13 +441,13 @@ void cv_wl_keyboard::handle_kb_keymap(void *data, struct wl_keyboard *kb, uint32
     munmap(map_str, size);
     close(fd);
     if (!keyboard->xkb_.keymap) {
-        fprintf(stderr, "failed to compile keymap\n");
+        std::cerr << "failed to compile keymap" << std::endl;
         return;
     }
 
     keyboard->xkb_.state = xkb_state_new(keyboard->xkb_.keymap);
     if (!keyboard->xkb_.state) {
-        fprintf(stderr, "failed to create XKB state\n");
+        std::cerr << "failed to create XKB state" << std::endl;
         xkb_keymap_unref(keyboard->xkb_.keymap);
         return;
     }
@@ -451,14 +470,14 @@ void cv_wl_keyboard::handle_kb_leave(void *data, struct wl_keyboard *keyboard, u
 
 void cv_wl_keyboard::handle_kb_key(void *data, struct wl_keyboard *keyboard, uint32_t serial, uint32_t time, uint32_t key, uint32_t state)
 {
-    int code = key + 8;
+    xkb_keycode_t keycode = xkb_keycode_from_raw_keycode(key);
     auto *kb = reinterpret_cast<cv_wl_keyboard *>(data);
 
-    fprintf(stderr, "Key is %d state is %d\n", key, state);
+    std::cerr << "Key is " << key << " state is " << state << std::endl;
     if (state == WL_KEYBOARD_KEY_STATE_RELEASED) {
-        xkb_keysym_t keysym = xkb_state_key_get_one_sym(kb->xkb_.state, code);
-        kb->key_queue_.push(static_cast<uint8_t>(keysym));
-        fprintf(stderr, "%s: ASCII=%x queued\n", __func__, kb->key_queue_.back());
+        xkb_keysym_t keysym = xkb_state_key_get_one_sym(kb->xkb_.state, keycode);
+        kb->key_queue_.push(xkb_keysym_to_ascii(keysym));
+        std::cerr << __func__ << ": ASCII=" << kb->key_queue_.back() << "queued" << std::endl;
     }
 
 }
@@ -481,10 +500,13 @@ void cv_wl_keyboard::handle_kb_repeat(void *data, struct wl_keyboard *wl_keyboar
  * cv_wl_input implementation
  */
 cv_wl_input::cv_wl_input(struct wl_seat *seat)
-//    :   seat_(seat)
+    :   seat_(seat)
 {
-    seat_ = seat;
+    if (!seat_)
+        throw std::runtime_error("Invalid seat detected when initializing");
     wl_seat_add_listener(seat_, &seat_listener_, this);
+
+    g_core->display()->roundtrip();
 }
 
 cv_wl_input::~cv_wl_input()
@@ -554,7 +576,9 @@ int cv_wl_buffer::create_shm(struct wl_shm *shm, int width, int height, uint32_t
     int fd = shm_open(shm_path_.c_str(), O_RDWR | O_CREAT, 0700);
     if (fd < 0)
         throw_system_error("creating a buffer file failed: ", errno);
-    ftruncate(fd, size);
+
+    if (ftruncate(fd, size) < 0)
+        throw_system_error("failed to truncate a shm buffer", errno);
 
     shm_data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (shm_data == MAP_FAILED) {
@@ -668,22 +692,38 @@ void cv_wl_window::handle_surface_close(void *data, struct xdg_surface *surface)
  * cv_wl_core implementation
  */
 cv_wl_core::cv_wl_core()
-    :   display_(std::make_shared<cv_wl_display>())
 {
-    if (!display_)
-        throw std::runtime_error("Could not create display");
 }
 
 cv_wl_core::~cv_wl_core()
 {
     this->destroy_all_windows();
+    input_.reset();
     display_.reset();
     std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
+}
+
+void cv_wl_core::init()
+{
+    display_ = std::make_shared<cv_wl_display>();
+    if (!display_)
+        throw std::runtime_error("Could not create display");
+    display_->roundtrip();
+
+    input_ = std::make_shared<cv_wl_input>(display_->seat());
+    if (!input_)
+        throw std::runtime_error("Could not create input");
+    display_->roundtrip();
 }
 
 shared_ptr<cv_wl_display> cv_wl_core::display()
 {
     return display_;
+}
+
+shared_ptr<cv_wl_input> cv_wl_core::input()
+{
+    return input_;
 }
 
 shared_ptr<cv_wl_window> cv_wl_core::get_window(std::string const& name)
@@ -730,8 +770,9 @@ shared_ptr<cv_wl_core> g_core;
 CV_IMPL int cvInitSystem(int argc, char **argv)
 {
     if (!g_core) try {
-        g_core = std::make_shared<cv_wl_core>();
         std::cerr << BACKEND_NAME << ": Initializing backend" << std::endl;
+        g_core = std::make_shared<cv_wl_core>();
+        g_core->init();
     } catch (...) {
         /* We just need to report an error */
     }
@@ -833,7 +874,8 @@ CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
 
 CV_IMPL int cvWaitKey(int delay)
 {
-    return g_core->display()->wait_key(0);
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": delay=" << delay << std::endl;
+    return g_core->input()->keyboard()->wait_key(0);
 }
 
 #ifdef HAVE_OPENGL
@@ -848,7 +890,7 @@ CV_IMPL void cvSetOpenGlContext(const char*)
 CV_IMPL void cvUpdateWindow(const char*)
 {
 }
-#endif // !HAVE_OPENGL
+#endif // HAVE_OPENGL
 
 #endif // HAVE_WAYLAND
 #endif // _WIN32
