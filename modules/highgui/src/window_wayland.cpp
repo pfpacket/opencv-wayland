@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <queue>
 #include <algorithm>
 #include <functional>
 #include <memory>
@@ -22,6 +23,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <linux/input.h>
 
 #include <wayland-client.h>
 #include <wayland-client-protocol.h>
@@ -30,13 +32,27 @@
 #include <wayland-version.h>
 #include "xdg-shell-client-protocol.h"
 
+#include <xkbcommon/xkbcommon.h>
+
 #define BACKEND_NAME "[DEBUG] OpenCV Wayland"
 
+#define DEBUG_PRINT_LOCATION_INFO \
+    std::cout << BACKEND_NAME << ": " << __func__ << ": " << __FILE__ << ":" << __LINE__ << " passed" << std::endl
 
 /*                              */
 /*  OpenCV highgui internals    */
 /*                              */
 using std::shared_ptr;
+
+class cv_wl_display;
+class cv_wl_input;
+class cv_wl_keyboard;
+class cv_wl_buffer;
+class cv_wl_window;
+class cv_wl_core;
+
+extern shared_ptr<cv_wl_core> g_core;
+
 
 static void throw_system_error(std::string const& errmsg, int err)
 {
@@ -72,11 +88,14 @@ public:
     ~cv_wl_display();
 
     int dispatch();
+    int dispatch_pending();
     int roundtrip();
     struct wl_shm *shm();
     uint32_t formats() const;
     struct wl_surface *get_surface();
     struct xdg_surface *get_shell_surface(struct wl_surface *surface);
+
+    int wait_key(int delay);
 
 private:
     struct wl_display *display_;
@@ -87,22 +106,39 @@ private:
     struct wl_shm_listener shmlistener_{&handle_shm_format};
     struct xdg_shell *shell_ = nullptr;
     struct xdg_shell_listener shell_listener_{&handle_shell_ping};
-    struct wl_seat *seat_ = nullptr;
-    struct wl_seat_listener seat_listener_{&handle_seat_capabilities, &handle_seat_name};
-    struct wl_keyboard *keyboard_ = nullptr;
-    struct wl_keyboard_listener keyboard_listener_{
-        &handle_kb_keymap, &handle_kb_enter, &handle_kb_leave,
-        &handle_kb_key, &handle_kb_modifiers, &handle_kb_repeat
-    };
     uint32_t formats_ = 0;
+    shared_ptr<cv_wl_input> input_;
 
     void init();
     static void handle_reg_global(void *data, struct wl_registry *reg, uint32_t name, const char *iface, uint32_t version);
     static void handle_reg_remove(void *data, struct wl_registry *wl_registry, uint32_t name);
     static void handle_shm_format(void *data, struct wl_shm *wl_shm, uint32_t format);
     static void handle_shell_ping(void *data, struct xdg_shell *shell, uint32_t serial);
-    static void handle_seat_capabilities(void *data, struct wl_seat *wl_seat, uint32_t capabilities);
-    static void handle_seat_name(void *data, struct wl_seat *wl_seat, const char *name);
+};
+
+class cv_wl_keyboard {
+public:
+    cv_wl_keyboard(struct wl_keyboard *keyboard);
+    ~cv_wl_keyboard();
+
+    int wait_key(int delay);
+
+private:
+    struct {
+        struct xkb_context *ctx;
+        struct xkb_keymap *keymap;
+        struct xkb_state *state;
+        xkb_mod_mask_t control_mask;
+        xkb_mod_mask_t alt_mask;
+        xkb_mod_mask_t shift_mask;
+    } xkb_{nullptr, nullptr, nullptr, 0, 0, 0};
+    struct wl_keyboard *keyboard_ = nullptr;
+    struct wl_keyboard_listener keyboard_listener_{
+        &handle_kb_keymap, &handle_kb_enter, &handle_kb_leave,
+        &handle_kb_key, &handle_kb_modifiers, &handle_kb_repeat
+    };
+    std::queue<int> key_queue_;
+
     static void handle_kb_keymap(void *data, struct wl_keyboard *keyboard, uint32_t format, int fd, uint32_t size);
     static void handle_kb_enter(void *data, struct wl_keyboard *keyboard, uint32_t serial, struct wl_surface *surface, struct wl_array *keys);
     static void handle_kb_leave(void *data, struct wl_keyboard *keyboard, uint32_t serial, struct wl_surface *surface);
@@ -112,52 +148,23 @@ private:
     static void handle_kb_repeat(void *data, struct wl_keyboard *wl_keyboard, int32_t rate, int32_t delay);
 };
 
-void cv_wl_display::handle_seat_capabilities(void *data, struct wl_seat *wl_seat, uint32_t caps)
-{
-    auto *display = reinterpret_cast<cv_wl_display *>(data);
+class cv_wl_input {
+public:
+    cv_wl_input(struct wl_seat *seat);
+    ~cv_wl_input();
 
-    if (caps & WL_SEAT_CAPABILITY_KEYBOARD) {
-        std::cerr << BACKEND_NAME << ": seat cap: keyboard available" << std::endl;
-        display->keyboard_ = wl_seat_get_keyboard(display->seat_);
-        wl_keyboard_add_listener(display->keyboard_, &display->keyboard_listener_, display);
-    }
-}
+    shared_ptr<cv_wl_keyboard> keyboard();
 
-void cv_wl_display::handle_seat_name(void *data, struct wl_seat *wl_seat, const char *name)
-{
-}
+private:
+    struct wl_seat *seat_;
+    struct wl_seat_listener seat_listener_{
+        &handle_seat_capabilities, &handle_seat_name
+    };
+    shared_ptr<cv_wl_keyboard> keyboard_;
 
-void cv_wl_display::handle_kb_keymap(void *data, struct wl_keyboard *keyboard, uint32_t format, int fd, uint32_t size)
-{
-}
-
-void cv_wl_display::handle_kb_enter(void *data, struct wl_keyboard *keyboard, uint32_t serial, struct wl_surface *surface, struct wl_array *keys)
-{
-}
-
-void cv_wl_display::handle_kb_leave(void *data, struct wl_keyboard *keyboard, uint32_t serial, struct wl_surface *surface)
-{
-}
-
-void cv_wl_display::handle_kb_key(void *data, struct wl_keyboard *keyboard, uint32_t serial, uint32_t time, uint32_t key, uint32_t state)
-{
-    fprintf(stderr, "Key is %d state is %d\n", key, state);
-    if (key == KEY_ESC && state == 0) {
-    }
-}
-
-void cv_wl_display::handle_kb_modifiers(void *data, struct wl_keyboard *keyboard,
-                        uint32_t serial, uint32_t mods_depressed,
-                        uint32_t mods_latched, uint32_t mods_locked,
-                        uint32_t group)
-{
-    fprintf(stderr, "Modifiers depressed %d, latched %d, locked %d, group %d\n",
-        mods_depressed, mods_latched, mods_locked, group);
-}
-
-void cv_wl_display::handle_kb_repeat(void *data, struct wl_keyboard *wl_keyboard, int32_t rate, int32_t delay)
-{
-}
+    static void handle_seat_capabilities(void *data, struct wl_seat *wl_seat, uint32_t capabilities);
+    static void handle_seat_name(void *data, struct wl_seat *wl_seat, const char *name);
+};
 
 class cv_wl_buffer {
 private:
@@ -243,6 +250,7 @@ cv_wl_display::cv_wl_display()
 }
 
 cv_wl_display::cv_wl_display(std::string const& disp)
+
     :   display_{wl_display_connect(disp.c_str())}
 {
     init();
@@ -250,19 +258,24 @@ cv_wl_display::cv_wl_display(std::string const& disp)
 
 cv_wl_display::~cv_wl_display()
 {
+    input_.reset();
     wl_shm_destroy(shm_);
     xdg_shell_destroy(shell_);
     wl_compositor_destroy(compositor_);
     wl_registry_destroy(registry_);
     wl_display_flush(display_);
     wl_display_disconnect(display_);
-
     std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
 int cv_wl_display::dispatch()
 {
     return wl_display_dispatch(display_);
+}
+
+int cv_wl_display::dispatch_pending()
+{
+    return wl_display_dispatch_pending(display_);
 }
 
 int cv_wl_display::roundtrip()
@@ -288,6 +301,11 @@ struct wl_surface *cv_wl_display::get_surface()
 struct xdg_surface *cv_wl_display::get_shell_surface(struct wl_surface *surface)
 {
     return xdg_shell_get_xdg_surface(shell_, surface);
+}
+
+int cv_wl_display::wait_key(int delay)
+{
+    return input_->keyboard()->wait_key(delay);
 }
 
 void cv_wl_display::init()
@@ -325,9 +343,9 @@ void cv_wl_display::handle_reg_global(void *data, struct wl_registry *reg, uint3
         xdg_shell_use_unstable_version(display->shell_, XDG_SHELL_VERSION_CURRENT);
         xdg_shell_add_listener(display->shell_, &display->shell_listener_, display);
     } else if (interface == "wl_seat") {
-        display->seat_ = (struct wl_seat *)
+        struct wl_seat *seat = (struct wl_seat *)
             wl_registry_bind(reg, name, &wl_seat_interface, version);
-        wl_seat_add_listener(display->seat_, &display->seat_listener_, display);
+        display->input_ = std::make_shared<cv_wl_input>(seat);
     }
 }
 
@@ -348,6 +366,157 @@ void cv_wl_display::handle_shell_ping(void *data, struct xdg_shell *shell, uint3
 
 
 /*
+ * cv_wl_keyboard implementation
+ */
+cv_wl_keyboard::cv_wl_keyboard(struct wl_keyboard *keyboard)
+    :   keyboard_(keyboard)
+{
+    wl_keyboard_add_listener(keyboard_, &keyboard_listener_, this);
+    xkb_.ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    if (!xkb_.ctx)
+        throw std::runtime_error("Failed to create xkb context");
+}
+
+cv_wl_keyboard::~cv_wl_keyboard()
+{
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
+    if (xkb_.state)
+        xkb_state_unref(xkb_.state);
+    if (xkb_.keymap)
+        xkb_keymap_unref(xkb_.keymap);
+    if (xkb_.ctx)
+        xkb_context_unref(xkb_.ctx);
+    wl_keyboard_destroy(keyboard_);
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
+}
+
+int cv_wl_keyboard::wait_key(int delay)
+{
+    int key = -1;
+    while (g_core->display()->dispatch() != -1) {
+        if (!key_queue_.empty()) {
+            key = key_queue_.back();
+            break;
+        }
+    }
+    return key;
+}
+
+void cv_wl_keyboard::handle_kb_keymap(void *data, struct wl_keyboard *kb, uint32_t format, int fd, uint32_t size)
+{
+    auto *keyboard = reinterpret_cast<cv_wl_keyboard *>(data);
+
+    if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
+        close(fd);
+        return;
+    }
+
+    char *map_str = (char *)mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+    if (map_str == MAP_FAILED) {
+        close(fd);
+        return;
+    }
+
+    keyboard->xkb_.keymap = xkb_keymap_new_from_string(
+        keyboard->xkb_.ctx, map_str, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    munmap(map_str, size);
+    close(fd);
+    if (!keyboard->xkb_.keymap) {
+        fprintf(stderr, "failed to compile keymap\n");
+        return;
+    }
+
+    keyboard->xkb_.state = xkb_state_new(keyboard->xkb_.keymap);
+    if (!keyboard->xkb_.state) {
+        fprintf(stderr, "failed to create XKB state\n");
+        xkb_keymap_unref(keyboard->xkb_.keymap);
+        return;
+    }
+
+    keyboard->xkb_.control_mask =
+        1 << xkb_keymap_mod_get_index(keyboard->xkb_.keymap, "Control");
+    keyboard->xkb_.alt_mask =
+        1 << xkb_keymap_mod_get_index(keyboard->xkb_.keymap, "Mod1");
+    keyboard->xkb_.shift_mask =
+        1 << xkb_keymap_mod_get_index(keyboard->xkb_.keymap, "Shift");
+}
+
+void cv_wl_keyboard::handle_kb_enter(void *data, struct wl_keyboard *keyboard, uint32_t serial, struct wl_surface *surface, struct wl_array *keys)
+{
+}
+
+void cv_wl_keyboard::handle_kb_leave(void *data, struct wl_keyboard *keyboard, uint32_t serial, struct wl_surface *surface)
+{
+}
+
+void cv_wl_keyboard::handle_kb_key(void *data, struct wl_keyboard *keyboard, uint32_t serial, uint32_t time, uint32_t key, uint32_t state)
+{
+    int code = key + 8;
+    auto *kb = reinterpret_cast<cv_wl_keyboard *>(data);
+
+    fprintf(stderr, "Key is %d state is %d\n", key, state);
+    if (state == WL_KEYBOARD_KEY_STATE_RELEASED) {
+        xkb_keysym_t keysym = xkb_state_key_get_one_sym(kb->xkb_.state, code);
+        kb->key_queue_.push(static_cast<uint8_t>(keysym));
+        fprintf(stderr, "%s: ASCII=%x queued\n", __func__, kb->key_queue_.back());
+    }
+
+}
+
+void cv_wl_keyboard::handle_kb_modifiers(void *data, struct wl_keyboard *keyboard,
+                        uint32_t serial, uint32_t mods_depressed,
+                        uint32_t mods_latched, uint32_t mods_locked,
+                        uint32_t group)
+{
+    fprintf(stderr, "Modifiers depressed %d, latched %d, locked %d, group %d\n",
+        mods_depressed, mods_latched, mods_locked, group);
+}
+
+void cv_wl_keyboard::handle_kb_repeat(void *data, struct wl_keyboard *wl_keyboard, int32_t rate, int32_t delay)
+{
+}
+
+
+/*
+ * cv_wl_input implementation
+ */
+cv_wl_input::cv_wl_input(struct wl_seat *seat)
+//    :   seat_(seat)
+{
+    seat_ = seat;
+    wl_seat_add_listener(seat_, &seat_listener_, this);
+}
+
+cv_wl_input::~cv_wl_input()
+{
+    keyboard_.reset();
+    wl_seat_destroy(seat_);
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
+}
+
+shared_ptr<cv_wl_keyboard> cv_wl_input::keyboard()
+{
+    return keyboard_;
+}
+
+void cv_wl_input::handle_seat_capabilities(void *data, struct wl_seat *wl_seat, uint32_t caps)
+{
+    auto *input = reinterpret_cast<cv_wl_input *>(data);
+
+    if (caps & WL_SEAT_CAPABILITY_KEYBOARD) {
+        std::cerr << BACKEND_NAME << ": seat cap: keyboard available" << std::endl;
+        struct wl_keyboard *keyboard = wl_seat_get_keyboard(input->seat_);
+        input->keyboard_ = std::make_shared<cv_wl_keyboard>(keyboard);
+    }
+}
+
+void cv_wl_input::handle_seat_name(void *data, struct wl_seat *wl_seat, const char *name)
+{
+    std::cerr << BACKEND_NAME << ": seat name: " << name << std::endl;
+}
+
+
+/*
  * cv_wl_buffer implementation
  */
 int cv_wl_buffer::number_ = 0;
@@ -355,6 +524,7 @@ int cv_wl_buffer::number_ = 0;
 cv_wl_buffer::~cv_wl_buffer()
 {
     this->destroy();
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
 void cv_wl_buffer::handle_buffer_release(void *data, struct wl_buffer *buffer)
@@ -506,6 +676,8 @@ cv_wl_core::cv_wl_core()
 
 cv_wl_core::~cv_wl_core()
 {
+    this->destroy_all_windows();
+    display_.reset();
     std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
@@ -661,8 +833,7 @@ CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
 
 CV_IMPL int cvWaitKey(int delay)
 {
-    while (g_core->display()->dispatch() != -1);
-    return 0;
+    return g_core->display()->wait_key(0);
 }
 
 #ifdef HAVE_OPENGL
