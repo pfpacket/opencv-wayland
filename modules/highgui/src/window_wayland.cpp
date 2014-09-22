@@ -106,6 +106,7 @@ public:
     int roundtrip();
     struct wl_shm *shm();
     struct wl_seat *seat();
+    shared_ptr<cv_wl_input> input();
     uint32_t formats() const;
     struct wl_surface *get_surface();
     struct xdg_surface *get_shell_surface(struct wl_surface *surface);
@@ -120,6 +121,7 @@ private:
     struct xdg_shell *shell_ = nullptr;
     struct xdg_shell_listener shell_listener_{&handle_shell_ping};
     struct wl_seat *seat_ = nullptr;
+    shared_ptr<cv_wl_input> input_;
     uint32_t formats_ = 0;
 
     void init();
@@ -246,7 +248,6 @@ public:
     void init();
 
     shared_ptr<cv_wl_display> display();
-    shared_ptr<cv_wl_input> input();
     shared_ptr<cv_wl_window> get_window(std::string const& name);
     void *get_window_handle(std::string const& name);
     std::string const& get_window_name(void *handle);
@@ -256,7 +257,6 @@ public:
 
 private:
     shared_ptr<cv_wl_display> display_;
-    shared_ptr<cv_wl_input> input_;
     std::map<std::string, shared_ptr<cv_wl_window>> windows_;
     std::map<void *, std::string> handles_;
 };
@@ -285,6 +285,7 @@ cv_wl_display::~cv_wl_display()
     wl_compositor_destroy(compositor_);
     wl_registry_destroy(registry_);
     wl_display_flush(display_);
+    input_.reset();
     wl_display_disconnect(display_);
     std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
@@ -319,6 +320,11 @@ struct wl_seat *cv_wl_display::seat()
     return seat_;
 }
 
+shared_ptr<cv_wl_input> cv_wl_display::input()
+{
+    return input_;
+}
+
 uint32_t cv_wl_display::formats() const
 {
     return formats_;
@@ -342,7 +348,7 @@ void cv_wl_display::init()
     registry_ = wl_display_get_registry(display_);
     wl_registry_add_listener(registry_, &reglistener_, this);
     wl_display_roundtrip(display_);
-    if (!compositor_ || !shm_ || !shell_ || !seat_)
+    if (!compositor_ || !shm_ || !shell_ || !seat_ || !input_)
         throw std::runtime_error("Compositor doesn't have required interfaces");
 
     wl_display_roundtrip(display_);
@@ -370,6 +376,7 @@ void cv_wl_display::handle_reg_global(void *data, struct wl_registry *reg, uint3
     } else if (interface == "wl_seat") {
         display->seat_ = (struct wl_seat *)
             wl_registry_bind(reg, name, &wl_seat_interface, version);
+        display->input_ = std::make_shared<cv_wl_input>(display->seat_);
     }
 }
 
@@ -399,7 +406,6 @@ cv_wl_keyboard::cv_wl_keyboard(struct wl_keyboard *keyboard)
     xkb_.ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     if (!xkb_.ctx)
         throw std::runtime_error("Failed to create xkb context");
-    g_core->display()->roundtrip();
 }
 
 cv_wl_keyboard::~cv_wl_keyboard()
@@ -510,8 +516,6 @@ cv_wl_input::cv_wl_input(struct wl_seat *seat)
     if (!seat_)
         throw std::runtime_error("Invalid seat detected when initializing");
     wl_seat_add_listener(seat_, &seat_listener_, this);
-
-    g_core->display()->roundtrip();
 }
 
 cv_wl_input::~cv_wl_input()
@@ -725,7 +729,6 @@ cv_wl_core::cv_wl_core()
 cv_wl_core::~cv_wl_core()
 {
     this->destroy_all_windows();
-    input_.reset();
     display_.reset();
     std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
@@ -736,21 +739,11 @@ void cv_wl_core::init()
     if (!display_)
         throw std::runtime_error("Could not create display");
     display_->roundtrip();
-
-    input_ = std::make_shared<cv_wl_input>(display_->seat());
-    if (!input_)
-        throw std::runtime_error("Could not create input");
-    display_->roundtrip();
 }
 
 shared_ptr<cv_wl_display> cv_wl_core::display()
 {
     return display_;
-}
-
-shared_ptr<cv_wl_input> cv_wl_core::input()
-{
-    return input_;
 }
 
 shared_ptr<cv_wl_window> cv_wl_core::get_window(std::string const& name)
@@ -902,7 +895,7 @@ CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
 CV_IMPL int cvWaitKey(int delay)
 {
     std::cerr << BACKEND_NAME << ": " << __func__ << ": delay=" << delay << std::endl;
-    return g_core->input()->keyboard()->wait_key(0);
+    return g_core->display()->input()->keyboard()->wait_key(0);
 }
 
 #ifdef HAVE_OPENGL
