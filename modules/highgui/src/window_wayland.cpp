@@ -180,22 +180,27 @@ private:
 };
 
 class cv_wl_buffer {
-private:
-    static int number_;
-    struct wl_buffer_listener buffer_listener_ = {&handle_buffer_release};
-    std::string shm_path_;
-
-    static void handle_buffer_release(void *data, struct wl_buffer *buffer);
-
 public:
     struct wl_buffer *buffer = nullptr;
     void *shm_data = nullptr;
-    /* 'busy == 1' means 'buffer' is being used by a compositor */
-    int busy = 0;
 
     ~cv_wl_buffer();
     void destroy();
+    void busy(bool busy = true);
+    bool is_busy() const;
+    int width() const;
+    int height() const;
     int create_shm(struct wl_shm *shm, int width, int height, uint32_t format);
+
+private:
+    static int number_;
+    bool busy_ = false;
+    int width_ = 0, height_ = 0;
+    struct wl_buffer_listener buffer_listener_ = {&handle_buffer_release};
+    std::string shm_path_;
+
+    /* 'busy' means 'buffer' is being used by a compositor */
+    static void handle_buffer_release(void *data, struct wl_buffer *buffer);
 };
 
 class cv_wl_window {
@@ -549,19 +554,35 @@ cv_wl_buffer::~cv_wl_buffer()
     std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
-void cv_wl_buffer::handle_buffer_release(void *data, struct wl_buffer *buffer)
-{
-    auto *mybuf = reinterpret_cast<cv_wl_buffer *>(data);
-    mybuf->busy = 0;
-}
-
 void cv_wl_buffer::destroy()
 {
     if (buffer) {
         wl_buffer_destroy(buffer);
         buffer = nullptr;
+        width_ = 0;
+        height_ = 0;
     }
     shm_unlink(shm_path_.c_str());
+}
+
+void cv_wl_buffer::busy(bool busy)
+{
+    busy_ = busy;
+}
+
+bool cv_wl_buffer::is_busy() const
+{
+    return busy_;
+}
+
+int cv_wl_buffer::width() const
+{
+    return width_;
+}
+
+int cv_wl_buffer::height() const
+{
+    return height_;
 }
 
 int cv_wl_buffer::create_shm(struct wl_shm *shm, int width, int height, uint32_t format)
@@ -571,6 +592,8 @@ int cv_wl_buffer::create_shm(struct wl_shm *shm, int width, int height, uint32_t
     struct wl_shm_pool *pool;
 
     this->destroy();
+    this->width_ = width;
+    this->height_ = height;
 
     shm_path_ = "/opencv_wl_buffer-" + std::to_string(number_++);
     int fd = shm_open(shm_path_.c_str(), O_RDWR | O_CREAT, 0700);
@@ -593,6 +616,12 @@ int cv_wl_buffer::create_shm(struct wl_shm *shm, int width, int height, uint32_t
     wl_shm_pool_destroy(pool);
     close(fd);
     return 0;
+}
+
+void cv_wl_buffer::handle_buffer_release(void *data, struct wl_buffer *buffer)
+{
+    auto *mybuf = reinterpret_cast<cv_wl_buffer *>(data);
+    mybuf->busy(false);
 }
 
 
@@ -618,8 +647,6 @@ cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> display,
 
 cv_wl_window::~cv_wl_window()
 {
-    for (auto&& buffer : buffers_)
-        buffer.destroy();
     xdg_surface_destroy(shell_surface_);
     wl_surface_destroy(surface_);
     std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
@@ -637,32 +664,32 @@ std::pair<int, int> cv_wl_window::get_size() const
 
 void cv_wl_window::show_image(CvMat const *mat)
 {
-    width_ = mat->cols; height_ = mat->rows;
+    width_ = mat->cols;
+    height_ = mat->rows;
 
     cv_wl_buffer& buffer = this->next_buffer();
-    buffer.create_shm(display_->shm(), width_, height_, WL_SHM_FORMAT_XRGB8888);
 
     write_mat_to_xrgb8888(mat, buffer.shm_data);
 
     wl_surface_attach(surface_, buffer.buffer, 0, 0);
     wl_surface_damage(surface_, 0, 0, width_, height_);
     wl_surface_commit(surface_);
-    buffer.busy = 1;
+    buffer.busy();
 }
 
 cv_wl_buffer& cv_wl_window::next_buffer()
 {
     cv_wl_buffer *buffer;
 
-    if (!buffers_[0].busy)
+    if (!buffers_[0].is_busy())
         buffer = &buffers_[0];
-    else if (!buffers_[1].busy)
+    else if (!buffers_[1].is_busy())
         buffer = &buffers_[1];
     else
         throw std::runtime_error(
             "Both buffers are busy. Maybe a bug of a compositor?");
 
-    if (!buffer->buffer) {
+    if (!buffer->buffer || buffer->width() != width_ || buffer->height() != height_) {
         int ret = buffer->create_shm(display_->shm(),
             width_, height_, WL_SHM_FORMAT_XRGB8888);
         if (ret < 0)
