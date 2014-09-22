@@ -816,6 +816,30 @@ std::pair<int, int> cv_wl_window::get_size() const
     return std::make_pair(width_, height_);
 }
 
+cv_wl_buffer& cv_wl_window::next_buffer()
+{
+    cv_wl_buffer *buffer = nullptr;
+
+    while (!buffer) {
+        display_->roundtrip();
+        if (!buffers_[0].is_busy())
+            buffer = &buffers_[0];
+        else if (!buffers_[1].is_busy())
+            buffer = &buffers_[1];
+    }
+
+    if (!buffer->buffer || buffer->width() != width_ || buffer->height() != height_) {
+        int ret = buffer->create_shm(display_->shm(),
+            width_, height_, WL_SHM_FORMAT_XRGB8888);
+        if (ret < 0)
+            throw std::runtime_error("cannot create shm buffer");
+
+        /* paint the padding */
+        memset(buffer->shm_data, 0xff, width_ * height_ * 4);
+    }
+    return *buffer;
+}
+
 void cv_wl_window::show_image(CvMat const *mat)
 {
     width_ = mat->cols;
@@ -890,30 +914,6 @@ void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_butto
         break;
     }
     on_mouse_.callback(event, on_mouse_.last_x, on_mouse_.last_y, flag, on_mouse_.param);
-}
-
-cv_wl_buffer& cv_wl_window::next_buffer()
-{
-    cv_wl_buffer *buffer;
-
-    if (!buffers_[0].is_busy())
-        buffer = &buffers_[0];
-    else if (!buffers_[1].is_busy())
-        buffer = &buffers_[1];
-    else
-        throw std::runtime_error(
-            "Both buffers are busy. Maybe a bug of a compositor?");
-
-    if (!buffer->buffer || buffer->width() != width_ || buffer->height() != height_) {
-        int ret = buffer->create_shm(display_->shm(),
-            width_, height_, WL_SHM_FORMAT_XRGB8888);
-        if (ret < 0)
-            throw std::runtime_error("cannot create shm buffer");
-
-        /* paint the padding */
-        memset(buffer->shm_data, 0xff, width_ * height_ * 4);
-    }
-    return *buffer;
 }
 
 void cv_wl_window::handle_surface_configure(
