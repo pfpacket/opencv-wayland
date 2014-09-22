@@ -1,0 +1,11 @@
+TODOs of Wayland port
+
+What is not implemented:
+ * Trackbar - cvCreateTrackbar()
+ * Compositing all elements
+ * Tests
+
+What is currently working:
+ * Showing image - cvShowImage()
+ * Keyboard key handling - cvWaitKey()
+ * Mouse callback - cvSetMouseCallback()
