@@ -85,7 +85,6 @@ elseif(HAVE_COCOA)
   list(APPEND HIGHGUI_LIBRARIES "-framework Cocoa")
 endif()
 
-
 if(UNIX)
   #these variables are set by CHECK_MODULE macro
   foreach(P ${HIGHGUI_INCLUDE_DIRS})

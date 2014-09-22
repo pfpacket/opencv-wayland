@@ -53,6 +53,13 @@ class cv_wl_core;
 using std::shared_ptr;
 extern shared_ptr<cv_wl_core> g_core;
 
+template<typename Container>
+static void container_clear(Container& cont)
+{
+    Container empty_container;
+    std::swap(cont, empty_container);
+}
+
 static void throw_system_error(std::string const& errmsg, int err)
 {
     throw std::system_error(err, std::system_category(), errmsg);
@@ -81,10 +88,8 @@ static void draw_argb8888(void *d, uint8_t a, uint8_t r, uint8_t g, uint8_t b)
 
 static void write_mat_to_xrgb8888(CvMat const *mat, void *data)
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": writing image: " << mat->cols << "x" << mat->rows << " step=" << mat->step << std::endl;
-    int x, y;
-    for (y = 0; y < mat->rows; y++) {
-        for (x = 0; x < mat->cols; x++) {
+    for (int y = 0; y < mat->rows; y++) {
+        for (int x = 0; x < mat->cols; x++) {
             uint8_t p[3];
             p[0] = mat->data.ptr[mat->step * y + x * 3];
             p[1] = mat->data.ptr[mat->step * y + x * 3 + 1];
@@ -92,7 +97,6 @@ static void write_mat_to_xrgb8888(CvMat const *mat, void *data)
             draw_argb8888((char *)data + (y * mat->cols + x) * 4, 0x00, p[2], p[1], p[0]);
         }
     }
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": finished writing" << std::endl;
 }
 
 class cv_wl_display {
@@ -106,7 +110,6 @@ public:
     int flush();
     int roundtrip();
     struct wl_shm *shm();
-    struct wl_seat *seat();
     shared_ptr<cv_wl_input> input();
     uint32_t formats() const;
     struct wl_surface *get_surface();
@@ -121,7 +124,6 @@ private:
     struct wl_shm_listener shm_listener_{&handle_shm_format};
     struct xdg_shell *shell_ = nullptr;
     struct xdg_shell_listener shell_listener_{&handle_shell_ping};
-    struct wl_seat *seat_ = nullptr;
     shared_ptr<cv_wl_input> input_;
     uint32_t formats_ = 0;
 
@@ -364,11 +366,6 @@ struct wl_shm *cv_wl_display::shm()
     return shm_;
 }
 
-struct wl_seat *cv_wl_display::seat()
-{
-    return seat_;
-}
-
 shared_ptr<cv_wl_input> cv_wl_display::input()
 {
     return input_;
@@ -397,7 +394,7 @@ void cv_wl_display::init()
     registry_ = wl_display_get_registry(display_);
     wl_registry_add_listener(registry_, &reg_listener_, this);
     wl_display_roundtrip(display_);
-    if (!compositor_ || !shm_ || !shell_ || !seat_ || !input_)
+    if (!compositor_ || !shm_ || !shell_ || !input_)
         throw std::runtime_error("Compositor doesn't have required interfaces");
 
     wl_display_roundtrip(display_);
@@ -423,9 +420,9 @@ void cv_wl_display::handle_reg_global(void *data, struct wl_registry *reg, uint3
         xdg_shell_use_unstable_version(display->shell_, XDG_SHELL_VERSION_CURRENT);
         xdg_shell_add_listener(display->shell_, &display->shell_listener_, display);
     } else if (interface == "wl_seat") {
-        display->seat_ = (struct wl_seat *)
+        struct wl_seat *seat = (struct wl_seat *)
             wl_registry_bind(reg, name, &wl_seat_interface, version);
-        display->input_ = std::make_shared<cv_wl_input>(display->seat_);
+        display->input_ = std::make_shared<cv_wl_input>(seat);
     }
 }
 
@@ -471,7 +468,6 @@ void cv_wl_mouse::handle_pointer_enter(void *data, struct wl_pointer *pointer,
 
     mouse->entered_window_.push(window);
     window->mouse_enter(x, y);
-    fprintf(stderr, "Pointer entered surface %p at %d %d\n", surface, x, y);
 }
 
 void cv_wl_mouse::handle_pointer_leave(void *data,
@@ -482,7 +478,6 @@ void cv_wl_mouse::handle_pointer_leave(void *data,
 
     window->mouse_leave();
     mouse->entered_window_.pop();
-    fprintf(stderr, "Pointer left surface %p\n", surface);
 }
 
 void cv_wl_mouse::handle_pointer_motion(void *data,
@@ -494,7 +489,6 @@ void cv_wl_mouse::handle_pointer_motion(void *data,
     auto *window = mouse->entered_window_.front();
 
     window->mouse_motion(time, x, y);
-    printf("Pointer moved at %d %d\n", x, y);
 }
 
 void cv_wl_mouse::handle_pointer_button(void *data, struct wl_pointer *wl_pointer,
@@ -504,7 +498,6 @@ void cv_wl_mouse::handle_pointer_button(void *data, struct wl_pointer *wl_pointe
     auto *window = mouse->entered_window_.front();
 
     window->mouse_button(time, button, static_cast<wl_pointer_button_state>(state));
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": Button=" << button << " state=" << state << std::endl;
 }
 
 void cv_wl_mouse::handle_pointer_axis(void *data, struct wl_pointer *wl_pointer,
@@ -537,13 +530,6 @@ cv_wl_keyboard::~cv_wl_keyboard()
         xkb_context_unref(xkb_.ctx);
     wl_keyboard_destroy(keyboard_);
     std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
-}
-
-template<typename Container>
-static void container_clear(Container& cont)
-{
-    Container empty_container;
-    std::swap(cont, empty_container);
 }
 
 int cv_wl_keyboard::wait_key(int delay)
@@ -615,7 +601,7 @@ void cv_wl_keyboard::handle_kb_key(void *data, struct wl_keyboard *keyboard, uin
     if (state == WL_KEYBOARD_KEY_STATE_RELEASED) {
         xkb_keysym_t keysym = xkb_state_key_get_one_sym(kb->xkb_.state, keycode);
         kb->key_queue_.push(xkb_keysym_to_ascii(keysym));
-        std::cerr << __func__ << ": ASCII=" << kb->key_queue_.back() << "queued" << std::endl;
+        std::cerr << __func__ << ": ASCII=" << std::hex << kb->key_queue_.back() << std::dec << " queued" << std::endl;
     }
 
 }
@@ -673,13 +659,11 @@ void cv_wl_input::handle_seat_capabilities(void *data, struct wl_seat *wl_seat, 
     auto *input = reinterpret_cast<cv_wl_input *>(data);
 
     if (caps & WL_SEAT_CAPABILITY_POINTER) {
-        std::cerr << BACKEND_NAME << ": seat cap: mouse available" << std::endl;
         struct wl_pointer *pointer = wl_seat_get_pointer(input->seat_);
         input->mouse_ = std::make_shared<cv_wl_mouse>(pointer);
     }
 
     if (caps & WL_SEAT_GET_KEYBOARD) {
-        std::cerr << BACKEND_NAME << ": seat cap: keyboard available" << std::endl;
         struct wl_keyboard *keyboard = wl_seat_get_keyboard(input->seat_);
         input->keyboard_ = std::make_shared<cv_wl_keyboard>(keyboard);
     }
@@ -687,7 +671,6 @@ void cv_wl_input::handle_seat_capabilities(void *data, struct wl_seat *wl_seat, 
 
 void cv_wl_input::handle_seat_name(void *data, struct wl_seat *wl_seat, const char *name)
 {
-    std::cerr << BACKEND_NAME << ": seat name: " << name << std::endl;
 }
 
 
@@ -1095,7 +1078,6 @@ CV_IMPL void cvSetMouseCallback(const char* window_name, CvMouseCallback on_mous
 
 CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": " << name << std::endl;
     CvMat stub;
     CvMat *mat = cvGetMat(arr, &stub);
     auto window = g_core->get_window(name);
@@ -1104,7 +1086,6 @@ CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
 
 CV_IMPL int cvWaitKey(int delay)
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": delay=" << delay << std::endl;
     return g_core->display()->input()->keyboard()->wait_key(0);
 }
 
