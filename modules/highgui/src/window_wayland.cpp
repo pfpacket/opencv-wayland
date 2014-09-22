@@ -1086,11 +1086,6 @@ CV_IMPL void cvSetTrackbarPos(const char* name_bar, const char* window_name, int
 {
 }
 
-CV_IMPL int cvCreateButton(const char* button_name, CvButtonCallback on_change, void* userdata, int button_type, int initial_button_state)
-{
-    return 0;
-}
-
 CV_IMPL void cvSetMouseCallback(const char* window_name, CvMouseCallback on_mouse, void* param)
 {
     auto window = g_core->get_window(window_name);
