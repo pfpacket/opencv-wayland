@@ -44,6 +44,7 @@
 /*                              */
 class cv_wl_display;
 class cv_wl_input;
+class cv_wl_mouse;
 class cv_wl_keyboard;
 class cv_wl_buffer;
 class cv_wl_window;
@@ -114,10 +115,10 @@ public:
 private:
     struct wl_display *display_;
     struct wl_registry *registry_;
-    struct wl_registry_listener reglistener_{&handle_reg_global, &handle_reg_remove};
+    struct wl_registry_listener reg_listener_{&handle_reg_global, &handle_reg_remove};
     struct wl_compositor *compositor_ = nullptr;
     struct wl_shm *shm_ = nullptr;
-    struct wl_shm_listener shmlistener_{&handle_shm_format};
+    struct wl_shm_listener shm_listener_{&handle_shm_format};
     struct xdg_shell *shell_ = nullptr;
     struct xdg_shell_listener shell_listener_{&handle_shell_ping};
     struct wl_seat *seat_ = nullptr;
@@ -129,6 +130,34 @@ private:
     static void handle_reg_remove(void *data, struct wl_registry *wl_registry, uint32_t name);
     static void handle_shm_format(void *data, struct wl_shm *wl_shm, uint32_t format);
     static void handle_shell_ping(void *data, struct xdg_shell *shell, uint32_t serial);
+};
+
+class cv_wl_mouse {
+public:
+    enum button {
+        NONE = 0,
+        LBUTTON = 272,
+        RBUTTON = 273,
+        MBUTTON = 274,
+    };
+
+    cv_wl_mouse(struct wl_pointer *pointer);
+    ~cv_wl_mouse();
+
+private:
+    struct wl_pointer *pointer_;
+    struct wl_pointer_listener pointer_listener_{
+        &handle_pointer_enter, &handle_pointer_leave,
+        &handle_pointer_motion, &handle_pointer_button,
+        &handle_pointer_axis
+    };
+    std::queue<cv_wl_window *> entered_window_;
+
+    static void handle_pointer_enter(void *data, struct wl_pointer *pointer, uint32_t serial, struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy);
+    static void handle_pointer_leave(void *data, struct wl_pointer *pointer, uint32_t serial, struct wl_surface *surface);
+    static void handle_pointer_motion(void *data, struct wl_pointer *pointer, uint32_t time, wl_fixed_t sx, wl_fixed_t sy);
+    static void handle_pointer_button(void *data, struct wl_pointer *wl_pointer, uint32_t serial, uint32_t time, uint32_t button, uint32_t state);
+    static void handle_pointer_axis(void *data, struct wl_pointer *wl_pointer, uint32_t time, uint32_t axis, wl_fixed_t value);
 };
 
 class cv_wl_keyboard {
@@ -168,6 +197,7 @@ public:
     cv_wl_input(struct wl_seat *seat);
     ~cv_wl_input();
 
+    shared_ptr<cv_wl_mouse> mouse();
     shared_ptr<cv_wl_keyboard> keyboard();
 
 private:
@@ -175,6 +205,7 @@ private:
     struct wl_seat_listener seat_listener_{
         &handle_seat_capabilities, &handle_seat_name
     };
+    shared_ptr<cv_wl_mouse> mouse_;
     shared_ptr<cv_wl_keyboard> keyboard_;
 
     static void handle_seat_capabilities(void *data, struct wl_seat *wl_seat, uint32_t capabilities);
@@ -186,6 +217,7 @@ public:
     struct wl_buffer *buffer = nullptr;
     void *shm_data = nullptr;
 
+    cv_wl_buffer();
     ~cv_wl_buffer();
     void destroy();
     void busy(bool busy = true);
@@ -218,12 +250,27 @@ public:
 
     std::string const& name() const;
     std::pair<int, int> get_size() const;
+
+    void set_mouse_callback(CvMouseCallback on_mouse, void *param);
     void show_image(CvMat const *mat);
+
+    void mouse_enter(int x, int y);
+    void mouse_leave();
+    void mouse_motion(uint32_t time, int x, int y);
+    void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state);
 
 private:
     int const flags_;
     std::string const name_;
     int width_, height_;
+    struct {
+        bool drag = false;
+        int last_x = 0, last_y = 0;
+        cv_wl_mouse::button button = cv_wl_mouse::button::NONE;
+
+        CvMouseCallback callback = nullptr;
+        void *param = nullptr;
+    } on_mouse_;
 
     shared_ptr<cv_wl_display> display_;
     struct wl_surface *surface_;
@@ -269,6 +316,7 @@ cv_wl_display::cv_wl_display()
     :   display_{wl_display_connect(nullptr)}
 {
     init();
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
 }
 
 cv_wl_display::cv_wl_display(std::string const& disp)
@@ -276,6 +324,7 @@ cv_wl_display::cv_wl_display(std::string const& disp)
     :   display_{wl_display_connect(disp.c_str())}
 {
     init();
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
 }
 
 cv_wl_display::~cv_wl_display()
@@ -346,7 +395,7 @@ void cv_wl_display::init()
         throw_system_error("Could not connect to display: ", errno);
 
     registry_ = wl_display_get_registry(display_);
-    wl_registry_add_listener(registry_, &reglistener_, this);
+    wl_registry_add_listener(registry_, &reg_listener_, this);
     wl_display_roundtrip(display_);
     if (!compositor_ || !shm_ || !shell_ || !seat_ || !input_)
         throw std::runtime_error("Compositor doesn't have required interfaces");
@@ -367,7 +416,7 @@ void cv_wl_display::handle_reg_global(void *data, struct wl_registry *reg, uint3
     } else if (interface == "wl_shm") {
         display->shm_ = (struct wl_shm *)
             wl_registry_bind(reg, name, &wl_shm_interface, version);
-        wl_shm_add_listener(display->shm_, &display->shmlistener_, display);
+        wl_shm_add_listener(display->shm_, &display->shm_listener_, display);
     } else if (interface == "xdg_shell") {
         display->shell_ = (struct xdg_shell *)
             wl_registry_bind(reg, name, &xdg_shell_interface, version);
@@ -397,15 +446,85 @@ void cv_wl_display::handle_shell_ping(void *data, struct xdg_shell *shell, uint3
 
 
 /*
+ * cv_wl_mouse implementation
+ */
+cv_wl_mouse::cv_wl_mouse(struct wl_pointer *pointer)
+    :   pointer_(pointer)
+{
+    wl_pointer_add_listener(pointer_, &pointer_listener_, this);
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
+}
+
+cv_wl_mouse::~cv_wl_mouse()
+{
+    wl_pointer_destroy(pointer_);
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
+}
+
+void cv_wl_mouse::handle_pointer_enter(void *data, struct wl_pointer *pointer,
+    uint32_t serial, struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy)
+{
+    int x = wl_fixed_to_int(sx);
+    int y = wl_fixed_to_int(sy);
+    auto *mouse = reinterpret_cast<cv_wl_mouse *>(data);
+    auto *window = reinterpret_cast<cv_wl_window *>(wl_surface_get_user_data(surface));
+
+    mouse->entered_window_.push(window);
+    window->mouse_enter(x, y);
+    fprintf(stderr, "Pointer entered surface %p at %d %d\n", surface, x, y);
+}
+
+void cv_wl_mouse::handle_pointer_leave(void *data,
+    struct wl_pointer *pointer, uint32_t serial, struct wl_surface *surface)
+{
+    auto *mouse = reinterpret_cast<cv_wl_mouse *>(data);
+    auto *window = reinterpret_cast<cv_wl_window *>(wl_surface_get_user_data(surface));
+
+    window->mouse_leave();
+    mouse->entered_window_.pop();
+    fprintf(stderr, "Pointer left surface %p\n", surface);
+}
+
+void cv_wl_mouse::handle_pointer_motion(void *data,
+    struct wl_pointer *pointer, uint32_t time, wl_fixed_t sx, wl_fixed_t sy)
+{
+    int x = wl_fixed_to_int(sx);
+    int y = wl_fixed_to_int(sy);
+    auto *mouse = reinterpret_cast<cv_wl_mouse *>(data);
+    auto *window = mouse->entered_window_.front();
+
+    window->mouse_motion(time, x, y);
+    printf("Pointer moved at %d %d\n", x, y);
+}
+
+void cv_wl_mouse::handle_pointer_button(void *data, struct wl_pointer *wl_pointer,
+    uint32_t serial, uint32_t time, uint32_t button, uint32_t state)
+{
+    auto *mouse = reinterpret_cast<cv_wl_mouse *>(data);
+    auto *window = mouse->entered_window_.front();
+
+    window->mouse_button(time, button, static_cast<wl_pointer_button_state>(state));
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": Button=" << button << " state=" << state << std::endl;
+}
+
+void cv_wl_mouse::handle_pointer_axis(void *data, struct wl_pointer *wl_pointer,
+    uint32_t time, uint32_t axis, wl_fixed_t value)
+{
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": axis=" << axis << " value=" << value << std::endl;
+}
+
+
+/*
  * cv_wl_keyboard implementation
  */
 cv_wl_keyboard::cv_wl_keyboard(struct wl_keyboard *keyboard)
     :   keyboard_(keyboard)
 {
-    wl_keyboard_add_listener(keyboard_, &keyboard_listener_, this);
     xkb_.ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     if (!xkb_.ctx)
         throw std::runtime_error("Failed to create xkb context");
+    wl_keyboard_add_listener(keyboard_, &keyboard_listener_, this);
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
 }
 
 cv_wl_keyboard::~cv_wl_keyboard()
@@ -420,6 +539,13 @@ cv_wl_keyboard::~cv_wl_keyboard()
     std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
+template<typename Container>
+static void container_clear(Container& cont)
+{
+    Container empty_container;
+    std::swap(cont, empty_container);
+}
+
 int cv_wl_keyboard::wait_key(int delay)
 {
     int key = -1;
@@ -429,6 +555,7 @@ int cv_wl_keyboard::wait_key(int delay)
             break;
         }
     }
+    container_clear(key_queue_);
     return key;
 }
 
@@ -516,17 +643,28 @@ cv_wl_input::cv_wl_input(struct wl_seat *seat)
     if (!seat_)
         throw std::runtime_error("Invalid seat detected when initializing");
     wl_seat_add_listener(seat_, &seat_listener_, this);
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
 }
 
 cv_wl_input::~cv_wl_input()
 {
+    mouse_.reset();
     keyboard_.reset();
     wl_seat_destroy(seat_);
     std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
+shared_ptr<cv_wl_mouse> cv_wl_input::mouse()
+{
+    if (!mouse_)
+        throw std::runtime_error("seat: mouse not available");
+    return mouse_;
+}
+
 shared_ptr<cv_wl_keyboard> cv_wl_input::keyboard()
 {
+    if (!keyboard_)
+        throw std::runtime_error("seat: keyboard not available");
     return keyboard_;
 }
 
@@ -534,7 +672,13 @@ void cv_wl_input::handle_seat_capabilities(void *data, struct wl_seat *wl_seat, 
 {
     auto *input = reinterpret_cast<cv_wl_input *>(data);
 
-    if (caps & WL_SEAT_CAPABILITY_KEYBOARD) {
+    if (caps & WL_SEAT_CAPABILITY_POINTER) {
+        std::cerr << BACKEND_NAME << ": seat cap: mouse available" << std::endl;
+        struct wl_pointer *pointer = wl_seat_get_pointer(input->seat_);
+        input->mouse_ = std::make_shared<cv_wl_mouse>(pointer);
+    }
+
+    if (caps & WL_SEAT_GET_KEYBOARD) {
         std::cerr << BACKEND_NAME << ": seat cap: keyboard available" << std::endl;
         struct wl_keyboard *keyboard = wl_seat_get_keyboard(input->seat_);
         input->keyboard_ = std::make_shared<cv_wl_keyboard>(keyboard);
@@ -551,6 +695,11 @@ void cv_wl_input::handle_seat_name(void *data, struct wl_seat *wl_seat, const ch
  * cv_wl_buffer implementation
  */
 int cv_wl_buffer::number_ = 0;
+
+cv_wl_buffer::cv_wl_buffer()
+{
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
+}
 
 cv_wl_buffer::~cv_wl_buffer()
 {
@@ -647,6 +796,7 @@ cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> display,
     xdg_surface_set_title(shell_surface_, name_.c_str());
 
     wl_surface_set_user_data(surface_, this);
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
 }
 
 cv_wl_window::~cv_wl_window()
@@ -679,6 +829,67 @@ void cv_wl_window::show_image(CvMat const *mat)
     wl_surface_damage(surface_, 0, 0, width_, height_);
     wl_surface_commit(surface_);
     buffer.busy();
+}
+
+void cv_wl_window::set_mouse_callback(CvMouseCallback on_mouse, void *param)
+{
+    on_mouse_.callback = on_mouse;
+    on_mouse_.param = param;
+}
+
+void cv_wl_window::mouse_enter(int x, int y)
+{
+    on_mouse_.last_x = x;
+    on_mouse_.last_y = y;
+    on_mouse_.callback(cv::EVENT_MOUSEMOVE, x, y, 0, on_mouse_.param);
+}
+
+void cv_wl_window::mouse_leave()
+{
+}
+
+void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
+{
+    int flag = 0;
+    on_mouse_.last_x = x;
+    on_mouse_.last_y = y;
+
+    if (on_mouse_.drag) {
+        switch (on_mouse_.button) {
+        case cv_wl_mouse::LBUTTON:
+            flag = cv::EVENT_FLAG_LBUTTON;
+            break;
+        case cv_wl_mouse::RBUTTON:
+            flag = cv::EVENT_FLAG_RBUTTON;
+            break;
+        case cv_wl_mouse::MBUTTON:
+            flag = cv::EVENT_FLAG_MBUTTON;
+            break;
+        }
+    }
+    on_mouse_.callback(cv::EVENT_MOUSEMOVE, x, y, flag, on_mouse_.param);
+}
+
+void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state)
+{
+    int event = 0, flag = 0;
+    on_mouse_.button = static_cast<cv_wl_mouse::button>(button);
+    on_mouse_.drag = (state == WL_POINTER_BUTTON_STATE_PRESSED);
+    switch (button) {
+    case cv_wl_mouse::LBUTTON:
+        event = on_mouse_.drag ? cv::EVENT_LBUTTONDOWN : cv::EVENT_LBUTTONUP;
+        flag = cv::EVENT_FLAG_LBUTTON;
+        break;
+    case cv_wl_mouse::RBUTTON:
+        event = on_mouse_.drag ? cv::EVENT_RBUTTONDOWN : cv::EVENT_RBUTTONUP;
+        flag = cv::EVENT_FLAG_RBUTTON;
+        break;
+    case cv_wl_mouse::MBUTTON:
+        event = on_mouse_.drag ? cv::EVENT_MBUTTONDOWN : cv::EVENT_MBUTTONUP;
+        flag = cv::EVENT_FLAG_MBUTTON;
+        break;
+    }
+    on_mouse_.callback(event, on_mouse_.last_x, on_mouse_.last_y, flag, on_mouse_.param);
 }
 
 cv_wl_buffer& cv_wl_window::next_buffer()
@@ -724,6 +935,7 @@ void cv_wl_window::handle_surface_close(void *data, struct xdg_surface *surface)
  */
 cv_wl_core::cv_wl_core()
 {
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
 }
 
 cv_wl_core::~cv_wl_core()
@@ -881,6 +1093,9 @@ CV_IMPL int cvCreateButton(const char* button_name, CvButtonCallback on_change, 
 
 CV_IMPL void cvSetMouseCallback(const char* window_name, CvMouseCallback on_mouse, void* param)
 {
+    auto window = g_core->get_window(window_name);
+
+    window->set_mouse_callback(on_mouse, param);
 }
 
 CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
