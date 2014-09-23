@@ -37,7 +37,7 @@
 #define BACKEND_NAME "[DEBUG] OpenCV Wayland"
 
 #define DEBUG_PRINT_LOCATION_INFO \
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": " << __FILE__ << ":" << __LINE__ << " passed" << std::endl
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": " << __FILE__ << ":" << __LINE__ << " passed" << std::endl;
 
 /*                              */
 /*  OpenCV highgui internals    */
@@ -74,7 +74,7 @@ static int xkb_keysym_to_ascii(xkb_keysym_t keysym)
 /*
  * From /usr/include/wayland-client-protocol.h
  * @WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1: libxkbcommon compatible; to
- *	determine the xkb keycode, clients must add 8 to the key event keycode
+ *  determine the xkb keycode, clients must add 8 to the key event keycode
  */
 static xkb_keycode_t xkb_keycode_from_raw_keycode(int raw_keycode)
 {
@@ -99,6 +99,58 @@ static void write_mat_to_xrgb8888(CvMat const *mat, void *data)
     }
 }
 
+#include <sys/epoll.h>
+class epoller {
+public:
+    epoller() : epoll_fd_(epoll_create1(EPOLL_CLOEXEC))
+    {
+        if (epoll_fd_ < 0)
+            throw_system_error("Failed to create epoll fd: ", errno);
+    }
+
+    ~epoller()
+    {
+        close(epoll_fd_);
+    }
+
+    void add(int fd, int events = EPOLLIN)
+    {
+        this->ctl(EPOLL_CTL_ADD, fd, events);
+    }
+
+    void modify(int fd, int events)
+    {
+        this->ctl(EPOLL_CTL_MOD, fd, events);
+    }
+
+    void remove(int fd)
+    {
+        this->ctl(EPOLL_CTL_DEL, fd, 0);
+    }
+
+    void ctl(int op, int fd, int events)
+    {
+        struct epoll_event event{0, 0};
+        event.events = events;
+        event.data.fd = fd;
+        int ret = epoll_ctl(epoll_fd_, op, fd, &event);
+        if (ret < 0)
+            throw_system_error("epoll_ctl: ", errno);
+    }
+
+    std::vector<struct epoll_event> wait(int timeout = -1, int max_events = 16)
+    {
+        std::vector<struct epoll_event> events(max_events);
+        int event_num = epoll_wait(epoll_fd_, events.data(), events.size(), timeout);
+        if (event_num < 0)
+            throw_system_error("epoll_wait: ", errno);
+        return events;
+    }
+
+private:
+    int epoll_fd_;
+};
+
 class cv_wl_display {
 public:
     cv_wl_display();
@@ -109,6 +161,7 @@ public:
     int dispatch_pending();
     int flush();
     int roundtrip();
+    int run_once(int timeout);
     struct wl_shm *shm();
     shared_ptr<cv_wl_input> input();
     uint32_t formats() const;
@@ -116,6 +169,7 @@ public:
     struct xdg_surface *get_shell_surface(struct wl_surface *surface);
 
 private:
+    epoller poller_;
     struct wl_display *display_;
     struct wl_registry *registry_;
     struct wl_registry_listener reg_listener_{&handle_reg_global, &handle_reg_remove};
@@ -167,7 +221,7 @@ public:
     cv_wl_keyboard(struct wl_keyboard *keyboard);
     ~cv_wl_keyboard();
 
-    int wait_key(int delay);
+    int get_key();
 
 private:
     struct {
@@ -362,6 +416,38 @@ int cv_wl_display::roundtrip()
     return wl_display_roundtrip(display_);
 }
 
+int cv_wl_display::run_once(int timeout)
+{
+    // prepare to read events
+    this->dispatch_pending();
+    int ret = this->flush();
+    if (ret < 0 && errno == EAGAIN) {
+        poller_.modify(wl_display_get_fd(display_),
+            EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP);
+    } else if (ret < 0) {
+        return 0;
+    }
+
+    auto events = poller_.wait(timeout);
+    if (events.empty())
+        return 0;
+
+    if (events[0].events & EPOLLIN) {
+        this->dispatch();
+        std::cerr << BACKEND_NAME << ": " << __func__ << ":" << __LINE__ << ": EPOLLIN: dispatched" << std::endl;
+    }
+
+    if (events[0].events & EPOLLOUT) {
+        int ret = this->flush();
+        if (ret == 0) {
+            poller_.modify(wl_display_get_fd(display_),
+                EPOLLIN | EPOLLERR | EPOLLHUP);
+        }
+        std::cerr << BACKEND_NAME << ": " << __func__ << ":" << __LINE__ << ": EPOLLOUT: flushed" << std::endl;
+    }
+    return events[0].events;
+}
+
 struct wl_shm *cv_wl_display::shm()
 {
     return shm_;
@@ -401,6 +487,11 @@ void cv_wl_display::init()
     wl_display_roundtrip(display_);
     if (!(formats_ & (1 << WL_SHM_FORMAT_XRGB8888)))
         throw std::runtime_error("WL_SHM_FORMAT_XRGB32 not available");
+
+    poller_.add(
+        wl_display_get_fd(display_),
+        EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP
+     );
 }
 
 void cv_wl_display::handle_reg_global(void *data, struct wl_registry *reg, uint32_t name, const char *iface, uint32_t version)
@@ -533,14 +624,13 @@ cv_wl_keyboard::~cv_wl_keyboard()
     std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
-int cv_wl_keyboard::wait_key(int delay)
+int cv_wl_keyboard::get_key()
 {
     int key = -1;
-    while (g_core->display()->dispatch() != -1) {
-        if (!key_queue_.empty()) {
-            key = key_queue_.back();
-            break;
-        }
+    if (!key_queue_.empty()) {
+        key = key_queue_.back();
+        std::cerr << BACKEND_NAME << ": " << __func__ << ": keycode="
+            << std::hex << key << std::dec << " dequeued" << std::endl;
     }
     container_clear(key_queue_);
     return key;
@@ -595,16 +685,14 @@ void cv_wl_keyboard::handle_kb_leave(void *data, struct wl_keyboard *keyboard, u
 
 void cv_wl_keyboard::handle_kb_key(void *data, struct wl_keyboard *keyboard, uint32_t serial, uint32_t time, uint32_t key, uint32_t state)
 {
-    xkb_keycode_t keycode = xkb_keycode_from_raw_keycode(key);
     auto *kb = reinterpret_cast<cv_wl_keyboard *>(data);
+    xkb_keycode_t keycode = xkb_keycode_from_raw_keycode(key);
 
-    std::cerr << "Key is " << key << " state is " << state << std::endl;
     if (state == WL_KEYBOARD_KEY_STATE_RELEASED) {
         xkb_keysym_t keysym = xkb_state_key_get_one_sym(kb->xkb_.state, keycode);
         kb->key_queue_.push(xkb_keysym_to_ascii(keysym));
-        std::cerr << __func__ << ": ASCII=" << std::hex << kb->key_queue_.back() << std::dec << " queued" << std::endl;
+        std::cerr << __func__ << ": keycode=" << std::hex << kb->key_queue_.back() << std::dec << " queued" << std::endl;
     }
-
 }
 
 void cv_wl_keyboard::handle_kb_modifiers(void *data, struct wl_keyboard *keyboard,
@@ -612,8 +700,8 @@ void cv_wl_keyboard::handle_kb_modifiers(void *data, struct wl_keyboard *keyboar
                         uint32_t mods_latched, uint32_t mods_locked,
                         uint32_t group)
 {
-    fprintf(stderr, "Modifiers depressed %d, latched %d, locked %d, group %d\n",
-        mods_depressed, mods_latched, mods_locked, group);
+    std::cerr << "Modifiers depressed " << mods_depressed << ", latched " << mods_latched
+        << ", locked " << mods_locked << ", group " << group << std::endl;
 }
 
 void cv_wl_keyboard::handle_kb_repeat(void *data, struct wl_keyboard *wl_keyboard, int32_t rate, int32_t delay)
@@ -1093,7 +1181,17 @@ CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
 
 CV_IMPL int cvWaitKey(int delay)
 {
-    return g_core->display()->input()->keyboard()->wait_key(0);
+    int key = -1;
+    while (true) {
+        int events =
+            g_core->display()->run_once(delay > 0 ? delay : -1);
+        if (events & EPOLLIN) {
+            key = g_core->display()->input()->keyboard()->get_key();
+            if (key >= 0)
+                break;
+        }
+    }
+    return key;
 }
 
 #ifdef HAVE_OPENGL
