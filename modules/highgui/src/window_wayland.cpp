@@ -253,9 +253,9 @@ public:
     std::string const& name() const;
     std::pair<int, int> get_size() const;
 
-    void set_mouse_callback(CvMouseCallback on_mouse, void *param);
     void show_image(CvMat const *mat);
 
+    void set_mouse_callback(CvMouseCallback on_mouse, void *param);
     void mouse_enter(int x, int y);
     void mouse_leave();
     void mouse_motion(uint32_t time, int x, int y);
@@ -285,6 +285,7 @@ private:
 
     cv_wl_buffer& next_buffer();
 
+    void call_mouse_callback(int event, int x, int y, int flag);
     static void handle_surface_configure(void *, struct xdg_surface *, int32_t, int32_t, struct wl_array *, uint32_t);
     static void handle_surface_close(void *data, struct xdg_surface *xdg_surface);
 };
@@ -844,11 +845,17 @@ void cv_wl_window::set_mouse_callback(CvMouseCallback on_mouse, void *param)
     on_mouse_.param = param;
 }
 
+void cv_wl_window::call_mouse_callback(int event, int x, int y, int flag)
+{
+    if (on_mouse_.callback)
+        on_mouse_.callback(event, x, y, flag, on_mouse_.param);
+}
+
 void cv_wl_window::mouse_enter(int x, int y)
 {
     on_mouse_.last_x = x;
     on_mouse_.last_y = y;
-    on_mouse_.callback(cv::EVENT_MOUSEMOVE, x, y, 0, on_mouse_.param);
+    this->call_mouse_callback(cv::EVENT_MOUSEMOVE, x, y, 0);
 }
 
 void cv_wl_window::mouse_leave()
@@ -874,7 +881,7 @@ void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
             break;
         }
     }
-    on_mouse_.callback(cv::EVENT_MOUSEMOVE, x, y, flag, on_mouse_.param);
+    this->call_mouse_callback(cv::EVENT_MOUSEMOVE, x, y, flag);
 }
 
 void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state)
@@ -896,7 +903,7 @@ void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_butto
         flag = cv::EVENT_FLAG_MBUTTON;
         break;
     }
-    on_mouse_.callback(event, on_mouse_.last_x, on_mouse_.last_y, flag, on_mouse_.param);
+    this->call_mouse_callback(event, on_mouse_.last_x, on_mouse_.last_y, flag);
 }
 
 void cv_wl_window::handle_surface_configure(
