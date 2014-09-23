@@ -23,6 +23,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <sys/epoll.h>
 #include <linux/input.h>
 
 #include <wayland-client.h>
@@ -99,7 +100,6 @@ static void write_mat_to_xrgb8888(CvMat const *mat, void *data)
     }
 }
 
-#include <sys/epoll.h>
 class epoller {
 public:
     epoller() : epoll_fd_(epoll_create1(EPOLL_CLOEXEC))
@@ -144,6 +144,7 @@ public:
         int event_num = epoll_wait(epoll_fd_, events.data(), events.size(), timeout);
         if (event_num < 0)
             throw_system_error("epoll_wait: ", errno);
+        events.erase(events.begin() + event_num, events.end());
         return events;
     }
 
@@ -161,7 +162,10 @@ public:
     int dispatch_pending();
     int flush();
     int roundtrip();
-    int run_once(int timeout);
+
+    // int = events, bool = timeout or not
+    std::pair<uint32_t, bool> run_once(int timeout);
+
     struct wl_shm *shm();
     shared_ptr<cv_wl_input> input();
     uint32_t formats() const;
@@ -416,7 +420,7 @@ int cv_wl_display::roundtrip()
     return wl_display_roundtrip(display_);
 }
 
-int cv_wl_display::run_once(int timeout)
+std::pair<uint32_t, bool> cv_wl_display::run_once(int timeout)
 {
     // prepare to read events
     this->dispatch_pending();
@@ -425,19 +429,20 @@ int cv_wl_display::run_once(int timeout)
         poller_.modify(wl_display_get_fd(display_),
             EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP);
     } else if (ret < 0) {
-        return 0;
+        return std::make_pair(0, false);
     }
 
     auto events = poller_.wait(timeout);
     if (events.empty())
-        return 0;
+        return std::make_pair(0, true);
 
-    if (events[0].events & EPOLLIN) {
+    int events_ = events[0].events;
+    if (events_ & EPOLLIN) {
         this->dispatch();
         std::cerr << BACKEND_NAME << ": " << __func__ << ":" << __LINE__ << ": EPOLLIN: dispatched" << std::endl;
     }
 
-    if (events[0].events & EPOLLOUT) {
+    if (events_ & EPOLLOUT) {
         int ret = this->flush();
         if (ret == 0) {
             poller_.modify(wl_display_get_fd(display_),
@@ -445,7 +450,7 @@ int cv_wl_display::run_once(int timeout)
         }
         std::cerr << BACKEND_NAME << ": " << __func__ << ":" << __LINE__ << ": EPOLLOUT: flushed" << std::endl;
     }
-    return events[0].events;
+    return std::make_pair(events_, false);
 }
 
 struct wl_shm *cv_wl_display::shm()
@@ -1183,9 +1188,14 @@ CV_IMPL int cvWaitKey(int delay)
 {
     int key = -1;
     while (true) {
-        int events =
+        std::pair<uint32_t, bool> events =
             g_core->display()->run_once(delay > 0 ? delay : -1);
-        if (events & EPOLLIN) {
+
+        // timeout
+        if (events.second)
+            break;
+
+        if (events.first & EPOLLIN) {
             key = g_core->display()->input()->keyboard()->get_key();
             if (key >= 0)
                 break;
