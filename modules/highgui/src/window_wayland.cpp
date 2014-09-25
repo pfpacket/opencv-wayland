@@ -1086,12 +1086,18 @@ CV_IMPL int cvInitSystem(int argc, char **argv)
 {
     if (!g_core) try {
         std::cerr << BACKEND_NAME << ": Initializing backend" << std::endl;
+
         g_core = std::make_shared<cv_wl_core>();
+        if (!g_core)
+            throw std::runtime_error("Could not allocate memory for display");
         g_core->init();
+    } catch (std::exception& e) {
+        throw std::runtime_error(std::string("Wayland backend: ") + e.what());
     } catch (...) {
-        /* We just need to report an error */
+        throw std::runtime_error("Wayland backend: unknown error occurred");
     }
-    return g_core ? 0 : -1;
+
+    return 0;
 }
 
 CV_IMPL int cvStartWindowThread()
