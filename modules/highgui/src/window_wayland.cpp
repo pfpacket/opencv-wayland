@@ -1458,11 +1458,11 @@ CV_IMPL int cvWaitKey(int delay)
 {
     int key = -1;
 
+    for (auto&& name : g_core->get_window_names())
+        g_core->get_window(name)->show();
+
     while (true) {
         namespace chrono = std::chrono;
-
-        for (auto&& name : g_core->get_window_names())
-            g_core->get_window(name)->show();
 
         std::pair<uint32_t, bool> events =
             g_core->display()->run_once(delay > 0 ? delay : -1);
