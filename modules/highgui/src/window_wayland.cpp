@@ -5,10 +5,6 @@
 #ifndef _WIN32
 #if defined (HAVE_WAYLAND)
 
-#include <opencv2/core.hpp>
-#include <opencv2/highgui.hpp>
-#include <opencv2/highgui/highgui_c.h>
-
 #include <iostream>
 #include <string>
 #include <vector>
@@ -32,8 +28,11 @@
 #include <wayland-util.h>
 #include <wayland-version.h>
 #include "xdg-shell-client-protocol.h"
-
 #include <xkbcommon/xkbcommon.h>
+
+#include <opencv2/core.hpp>
+#include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
 
 #define BACKEND_NAME "[DEBUG] OpenCV Wayland"
 
@@ -897,15 +896,17 @@ void cv_wl_buffer::create_shm(struct wl_shm *shm, int width, int height, uint32_
         throw_system_error("creating a shared memory failed", errno);
 
     if (ftruncate(fd, size) < 0) {
+        int errno_ = errno;
         close(fd);
-        throw_system_error("failed to truncate a shm buffer", errno);
+        throw_system_error("failed to truncate a shm buffer", errno_);
     }
 
     shm_data_ = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (shm_data_ == MAP_FAILED) {
+        int errno_ = errno;
         close(fd);
         this->destroy();
-        throw_system_error("mmap", errno);
+        throw_system_error("failed to map shm", errno_);
     }
 
     struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, size);
@@ -942,7 +943,13 @@ std::pair<int, int> cv_wl_viewer::get_area()
 
 void cv_wl_viewer::set_image(cv::Mat image)
 {
-    image_ = std::move(image);
+    if (image.type() == CV_8UC1) {
+        cv::Mat bgr;
+        cv::cvtColor(image, bgr, CV_GRAY2BGR);
+        image_ = std::move(bgr);
+    } else {
+        image_ = std::move(image);
+    }
 }
 
 cv::Size cv_wl_viewer::get_image_area()
