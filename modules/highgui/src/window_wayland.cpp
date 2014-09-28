@@ -35,10 +35,13 @@
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 
-#define BACKEND_NAME "[DEBUG] OpenCV Wayland"
+#define BACKEND_NAME "OpenCV Wayland"
 
 #define DEBUG_PRINT_LOCATION_INFO \
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": " << __FILE__ << ":" << __LINE__ << " passed" << std::endl;
+#ifdef DEBUG \
+    std::cerr << "[DEBUG] " << BACKEND_NAME << ": " << __func__ << ": " \
+    << __FILE__ << ":" << __LINE__ << " passed" << std::endl; \
+#endif
 
 /*                              */
 /*  OpenCV highgui internals    */
@@ -288,7 +291,9 @@ private:
     bool busy_ = false;
     int width_ = 0, height_ = 0;
     struct wl_buffer *buffer_ = nullptr;
-    struct wl_buffer_listener buffer_listener_ = {&handle_buffer_release};
+    struct wl_buffer_listener buffer_listener_{
+        &handle_buffer_release
+    };
     void *shm_data_ = nullptr;
 
     static void handle_buffer_release(void *data, struct wl_buffer *buffer);
@@ -500,9 +505,7 @@ std::pair<uint32_t, bool> cv_wl_display::run_once(int timeout)
 
     int events_ = events[0].events;
     if (events_ & EPOLLIN) {
-        std::cerr << BACKEND_NAME << ": " << __func__ << ":" << __LINE__ << ": EPOLLIN: dispatching" << std::endl;
         this->dispatch();
-        std::cerr << BACKEND_NAME << ": " << __func__ << ":" << __LINE__ << ": EPOLLIN: dispatched" << std::endl;
     }
 
     if (events_ & EPOLLOUT) {
@@ -510,7 +513,6 @@ std::pair<uint32_t, bool> cv_wl_display::run_once(int timeout)
             poller_.modify(wl_display_get_fd(display_),
                 EPOLLIN | EPOLLERR | EPOLLHUP);
         }
-        std::cerr << BACKEND_NAME << ": " << __func__ << ":" << __LINE__ << ": EPOLLOUT: flushed" << std::endl;
     }
     return std::make_pair(events_, false);
 }
@@ -662,7 +664,6 @@ void cv_wl_mouse::handle_pointer_button(void *data, struct wl_pointer *wl_pointe
 void cv_wl_mouse::handle_pointer_axis(void *data, struct wl_pointer *wl_pointer,
     uint32_t time, uint32_t axis, wl_fixed_t value)
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": axis=" << axis << " value=" << value << std::endl;
 }
 
 
@@ -695,7 +696,7 @@ int cv_wl_keyboard::get_key()
 {
     int key = -1;
     if (!key_queue_.empty()) {
-        key = key_queue_.front();
+        key = key_queue_.back();
         std::cerr << BACKEND_NAME << ": " << __func__ << ": keycode="
             << std::hex << key << std::dec << " dequeued" << std::endl;
     }
@@ -758,7 +759,6 @@ void cv_wl_keyboard::handle_kb_key(void *data, struct wl_keyboard *keyboard, uin
     if (state == WL_KEYBOARD_KEY_STATE_RELEASED) {
         xkb_keysym_t keysym = xkb_state_key_get_one_sym(kb->xkb_.state, keycode);
         kb->key_queue_.push(xkb_keysym_to_ascii(keysym));
-        std::cerr << __func__ << ": keycode=" << std::hex << kb->key_queue_.back() << std::dec << " queued" << std::endl;
     }
 }
 
@@ -767,8 +767,6 @@ void cv_wl_keyboard::handle_kb_modifiers(void *data, struct wl_keyboard *keyboar
                         uint32_t mods_latched, uint32_t mods_locked,
                         uint32_t group)
 {
-    std::cerr << "Modifiers depressed " << mods_depressed << ", latched " << mods_latched
-        << ", locked " << mods_locked << ", group " << group << std::endl;
 }
 
 void cv_wl_keyboard::handle_kb_repeat(void *data, struct wl_keyboard *wl_keyboard, int32_t rate, int32_t delay)
@@ -1126,7 +1124,7 @@ void cv_wl_window::show()
     if (!next_frame_ready_)
         return;
 
-    const int tb_height = 20;
+    const int tb_height = 40;
     int tb_num = widgets_.size();
 
     if (viewer_) {
