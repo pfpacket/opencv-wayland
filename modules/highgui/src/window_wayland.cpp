@@ -14,6 +14,7 @@
 #include <functional>
 #include <memory>
 #include <system_error>
+#include <chrono>
 
 #include <unistd.h>
 #include <sys/mman.h>
@@ -379,6 +380,11 @@ private:
         CvMouseCallback callback = nullptr;
         void *param = nullptr;
     } on_mouse_;
+    bool next_frame_ready_ = true;
+    struct wl_callback *frame_callback_ = nullptr;
+    struct wl_callback_listener frame_listener_{
+        &handle_frame_callback
+    };
 
     shared_ptr<cv_wl_display> display_;
     struct wl_surface *surface_;
@@ -386,7 +392,8 @@ private:
     struct xdg_surface_listener surface_listener_{
         &handle_surface_configure, &handle_surface_close
     };
-    cv_wl_buffer buffer_;
+    /* double buffered */
+    cv_wl_buffer buffers_[2];
 
     shared_ptr<cv_wl_viewer> viewer_;
     cv::Point viewer_point_{0, 0};
@@ -394,11 +401,12 @@ private:
     std::vector<cv::Point> widgets_points_;
 
 
-    void prepare_buffer();
+    cv_wl_buffer& next_buffer();
 
     void call_mouse_callback(int event, int x, int y, int flag);
     static void handle_surface_configure(void *, struct xdg_surface *, int32_t, int32_t, struct wl_array *, uint32_t);
     static void handle_surface_close(void *data, struct xdg_surface *xdg_surface);
+    static void handle_frame_callback(void *data, struct wl_callback *cb, uint32_t time);
 };
 
 class cv_wl_core {
@@ -492,13 +500,13 @@ std::pair<uint32_t, bool> cv_wl_display::run_once(int timeout)
 
     int events_ = events[0].events;
     if (events_ & EPOLLIN) {
+        std::cerr << BACKEND_NAME << ": " << __func__ << ":" << __LINE__ << ": EPOLLIN: dispatching" << std::endl;
         this->dispatch();
         std::cerr << BACKEND_NAME << ": " << __func__ << ":" << __LINE__ << ": EPOLLIN: dispatched" << std::endl;
     }
 
     if (events_ & EPOLLOUT) {
-        int ret = this->flush();
-        if (ret == 0) {
+        if (this->flush() == 0) {
             poller_.modify(wl_display_get_fd(display_),
                 EPOLLIN | EPOLLERR | EPOLLHUP);
         }
@@ -687,7 +695,7 @@ int cv_wl_keyboard::get_key()
 {
     int key = -1;
     if (!key_queue_.empty()) {
-        key = key_queue_.back();
+        key = key_queue_.front();
         std::cerr << BACKEND_NAME << ": " << __func__ << ": keycode="
             << std::hex << key << std::dec << " dequeued" << std::endl;
     }
@@ -916,16 +924,17 @@ void cv_wl_buffer::create_shm(struct wl_shm *shm, int width, int height, uint32_
     close(fd);
 }
 
-void cv_wl_buffer::handle_buffer_release(void *data, struct wl_buffer *buffer)
-{
-    auto *mybuf = reinterpret_cast<cv_wl_buffer *>(data);
-    mybuf->busy(false);
-}
-
 void cv_wl_buffer::attach_to_surface(struct wl_surface *surface, int32_t x, int32_t y)
 {
     wl_surface_attach(surface, buffer_, x, y);
     this->busy();
+}
+
+void cv_wl_buffer::handle_buffer_release(void *data, struct wl_buffer *buffer)
+{
+    auto *cvbuf = reinterpret_cast<cv_wl_buffer *>(data);
+
+    cvbuf->busy(false);
 }
 
 
@@ -1070,19 +1079,28 @@ std::pair<int, int> cv_wl_window::get_size() const
     return std::make_pair(width_, height_);
 }
 
-void cv_wl_window::prepare_buffer()
+cv_wl_buffer& cv_wl_window::next_buffer()
 {
-    while (buffer_.is_busy())
-        display_->roundtrip();
+    cv_wl_buffer *buffer = nullptr;
+    while (!buffer) {
+        if (!buffers_[0].is_busy())
+            buffer = &buffers_[0];
+        else if (!buffers_[1].is_busy())
+            buffer = &buffers_[1];
+        else
+            throw std::runtime_error("Both buffers are busy, a server bug?");
+    }
 
-    if (!buffer_.is_allocated() ||
-        buffer_.width() != width_ || buffer_.height() != height_) {
-        buffer_.create_shm(display_->shm(),
+    if (!buffer->is_allocated() ||
+        buffer->width() != width_ || buffer->height() != height_) {
+        buffer->create_shm(display_->shm(),
             width_, height_, WL_SHM_FORMAT_XRGB8888);
 
         /* paint the padding */
-        std::memset(buffer_.data(), 0x00, width_ * height_ * 4);
+        std::memset(buffer->data(), 0x00, width_ * height_ * 4);
     }
+
+    return *buffer;
 }
 
 void cv_wl_window::show_image(cv::Mat image)
@@ -1105,6 +1123,9 @@ void cv_wl_window::create_trackbar(std::string const& name, int *value, int coun
 
 void cv_wl_window::show()
 {
+    if (!next_frame_ready_)
+        return;
+
     const int tb_height = 20;
     int tb_num = widgets_.size();
 
@@ -1112,22 +1133,40 @@ void cv_wl_window::show()
         auto size = viewer_->get_image_area();
         width_ = size.width;
         height_ = size.height + (tb_height * tb_num);
-        this->prepare_buffer();
-
-        viewer_->set_area(size.width, size.height);
-        viewer_->draw(buffer_.data() + (width_ * tb_height * tb_num * 4));
-        viewer_point_ = cv::Point(0, tb_height * tb_num);
     }
+
+    auto& buffer = this->next_buffer();
 
     for (int i = 0; i < tb_num; ++i) {
         widgets_[i]->set_area(width_, tb_height);
-        widgets_[i]->draw(buffer_.data() + (width_ * tb_height * 4 * i));
+        widgets_[i]->draw(buffer.data() + (width_ * tb_height * 4 * i));
         widgets_points_[i] = cv::Point(0, (width_ * tb_height * 4 * i));
     }
 
-    buffer_.attach_to_surface(surface_, 0, 0);
+    if (viewer_) {
+        viewer_->set_area(width_, viewer_->get_image_area().height);
+        viewer_->draw(buffer.data() + (width_ * tb_height * tb_num * 4));
+        viewer_point_ = cv::Point(0, tb_height * tb_num);
+    }
+
+    buffer.attach_to_surface(surface_, 0, 0);
     wl_surface_damage(surface_, 0, 0, width_, height_);
+
+    if (frame_callback_)
+        wl_callback_destroy(frame_callback_);
+    frame_callback_ = wl_surface_frame(surface_);
+    wl_callback_add_listener(frame_callback_, &frame_listener_, this);
+    next_frame_ready_ = false;
+
     wl_surface_commit(surface_);
+
+}
+
+void cv_wl_window::handle_frame_callback(void *data, struct wl_callback *cb, uint32_t time)
+{
+    auto *window = reinterpret_cast<cv_wl_window *>(data);
+
+    window->next_frame_ready_ = true;
 }
 
 void cv_wl_window::set_mouse_callback(CvMouseCallback on_mouse, void *param)
@@ -1420,6 +1459,8 @@ CV_IMPL int cvWaitKey(int delay)
     int key = -1;
 
     while (true) {
+        namespace chrono = std::chrono;
+
         for (auto&& name : g_core->get_window_names())
             g_core->get_window(name)->show();
 
