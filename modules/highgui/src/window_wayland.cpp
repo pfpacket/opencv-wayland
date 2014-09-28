@@ -1461,22 +1461,30 @@ CV_IMPL int cvWaitKey(int delay)
     for (auto&& name : g_core->get_window_names())
         g_core->get_window(name)->show();
 
+    namespace ch  = std::chrono;
+    auto limit = ch::milliseconds(delay);
+
     while (true) {
-        namespace chrono = std::chrono;
+        auto start = ch::steady_clock::now();
 
         std::pair<uint32_t, bool> events =
-            g_core->display()->run_once(delay > 0 ? delay : -1);
-
-        // timeout
-        if (events.second)
-            break;
+            g_core->display()->run_once(
+                limit.count() >= 0 ? limit.count() : -1);
 
         if (events.first & EPOLLIN) {
             key = g_core->display()->input()->keyboard()->get_key();
             if (key >= 0)
                 break;
         }
+
+        // timeout
+        auto end = ch::steady_clock::now();
+        auto elapsed = ch::duration_cast<ch::milliseconds>(end - start);
+        if (events.second || elapsed >= limit)
+            break;
+        limit -= elapsed;
     }
+
     return key;
 }
 
