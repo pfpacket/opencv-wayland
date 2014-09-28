@@ -48,6 +48,9 @@ class cv_wl_input;
 class cv_wl_mouse;
 class cv_wl_keyboard;
 class cv_wl_buffer;
+class cv_wl_widget;
+class cv_wl_viewer;
+class cv_wl_trackbar;
 class cv_wl_window;
 class cv_wl_core;
 
@@ -87,25 +90,12 @@ static void draw_argb8888(void *d, uint8_t a, uint8_t r, uint8_t g, uint8_t b)
     *((uint32_t *)d) = ((a << 24) | (r << 16) | (g << 8) | b);
 }
 
-static void write_mat_to_xrgb8888(CvMat const *mat, void *data)
-{
-    for (int y = 0; y < mat->rows; y++) {
-        for (int x = 0; x < mat->cols; x++) {
-            uint8_t p[3];
-            p[0] = mat->data.ptr[mat->step * y + x * 3];
-            p[1] = mat->data.ptr[mat->step * y + x * 3 + 1];
-            p[2] = mat->data.ptr[mat->step * y + x * 3 + 2];
-            draw_argb8888((char *)data + (y * mat->cols + x) * 4, 0x00, p[2], p[1], p[0]);
-        }
-    }
-}
-
 class epoller {
 public:
     epoller() : epoll_fd_(epoll_create1(EPOLL_CLOEXEC))
     {
         if (epoll_fd_ < 0)
-            throw_system_error("Failed to create epoll fd: ", errno);
+            throw_system_error("Failed to create epoll fd", errno);
     }
 
     ~epoller()
@@ -135,7 +125,7 @@ public:
         event.data.fd = fd;
         int ret = epoll_ctl(epoll_fd_, op, fd, &event);
         if (ret < 0)
-            throw_system_error("epoll_ctl: ", errno);
+            throw_system_error("epoll_ctl", errno);
     }
 
     std::vector<struct epoll_event> wait(int timeout = -1, int max_events = 16)
@@ -143,13 +133,18 @@ public:
         std::vector<struct epoll_event> events(max_events);
         int event_num = epoll_wait(epoll_fd_, events.data(), events.size(), timeout);
         if (event_num < 0)
-            throw_system_error("epoll_wait: ", errno);
+            throw_system_error("epoll_wait", errno);
         events.erase(events.begin() + event_num, events.end());
         return events;
     }
 
 private:
     int epoll_fd_;
+
+    epoller(epoller const&) = delete;
+    epoller& operator=(epoller const&) = delete;
+    epoller(epoller &&) = delete;
+    epoller& operator=(epoller &&) = delete;
 };
 
 class cv_wl_display {
@@ -274,27 +269,79 @@ private:
 
 class cv_wl_buffer {
 public:
-    struct wl_buffer *buffer = nullptr;
-    void *shm_data = nullptr;
-
     cv_wl_buffer();
     ~cv_wl_buffer();
+
     void destroy();
     void busy(bool busy = true);
     bool is_busy() const;
     int width() const;
     int height() const;
-    int create_shm(struct wl_shm *shm, int width, int height, uint32_t format);
+    bool is_allocated() const;
+    char *data();
+    void create_shm(struct wl_shm *shm, int width, int height, uint32_t format);
+    void attach_to_surface(struct wl_surface *surface, int32_t x, int32_t y);
 
 private:
     static int number_;
+    std::string shm_path_;
     bool busy_ = false;
     int width_ = 0, height_ = 0;
+    struct wl_buffer *buffer_ = nullptr;
     struct wl_buffer_listener buffer_listener_ = {&handle_buffer_release};
-    std::string shm_path_;
+    void *shm_data_ = nullptr;
 
-    /* 'busy' means 'buffer' is being used by a compositor */
     static void handle_buffer_release(void *data, struct wl_buffer *buffer);
+};
+
+class cv_wl_widget {
+public:
+    virtual ~cv_wl_widget() {}
+    virtual std::pair<int, int> get_area() = 0;
+    virtual bool set_area(int width, int height) = 0;
+    virtual void draw(void *data) = 0;
+    virtual void mouse_enter(int x, int y) {}
+    virtual void mouse_leave() {}
+    virtual void mouse_motion(uint32_t time, int x, int y) {}
+    virtual void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state) {}
+};
+
+class cv_wl_viewer : public cv_wl_widget {
+public:
+    cv_wl_viewer(int flags);
+    void set_image(cv::Mat image);
+    cv::Size get_image_area();
+    std::pair<int, int> get_area() override;
+    bool set_area(int width, int height) override;
+    void draw(void *data) override;
+
+private:
+    int flags_;
+    cv::Mat image_;
+    int width_, height_;
+
+    static void write_mat_to_xrgb8888(cv::Mat const& img, void *data);
+};
+
+class cv_wl_trackbar : public cv_wl_widget {
+public:
+    cv_wl_trackbar(std::string const& name, int *value, int count, CvTrackbarCallback2 on_change, void *data);
+    std::pair<int, int> get_area() override;
+    bool set_area(int width, int height) override;
+    void draw(void *data) override;
+    void mouse_enter(int x, int y) override;
+    void mouse_leave() override;
+    void mouse_motion(uint32_t time, int x, int y) override;
+    void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state) override;
+
+private:
+    std::string name_;
+    int *value_, count_;
+    int width_, height_;
+    struct {
+        CvTrackbarCallback2 callback;
+        void *data;
+    } on_change_;
 };
 
 class cv_wl_window {
@@ -311,7 +358,9 @@ public:
     std::string const& name() const;
     std::pair<int, int> get_size() const;
 
-    void show_image(CvMat const *mat);
+    void show_image(cv::Mat image);
+    void create_trackbar(std::string const& name, int *value, int count, CvTrackbarCallback2 on_change, void *userdata);
+    void show();
 
     void set_mouse_callback(CvMouseCallback on_mouse, void *param);
     void mouse_enter(int x, int y);
@@ -338,10 +387,15 @@ private:
     struct xdg_surface_listener surface_listener_{
         &handle_surface_configure, &handle_surface_close
     };
-    /* double-buffered */
-    cv_wl_buffer buffers_[2];
+    cv_wl_buffer buffer_;
 
-    cv_wl_buffer& next_buffer();
+    shared_ptr<cv_wl_viewer> viewer_;
+    cv::Point viewer_point_{0, 0};
+    std::vector<shared_ptr<cv_wl_widget>> widgets_;
+    std::vector<cv::Point> widgets_points_;
+
+
+    void prepare_buffer();
 
     void call_mouse_callback(int event, int x, int y, int flag);
     static void handle_surface_configure(void *, struct xdg_surface *, int32_t, int32_t, struct wl_array *, uint32_t);
@@ -356,6 +410,7 @@ public:
     void init();
 
     shared_ptr<cv_wl_display> display();
+    std::vector<std::string> get_window_names() const;
     shared_ptr<cv_wl_window> get_window(std::string const& name);
     void *get_window_handle(std::string const& name);
     std::string const& get_window_name(void *handle);
@@ -481,7 +536,7 @@ struct xdg_surface *cv_wl_display::get_shell_surface(struct wl_surface *surface)
 void cv_wl_display::init()
 {
     if (!display_)
-        throw_system_error("Could not connect to display: ", errno);
+        throw_system_error("Could not connect to display", errno);
 
     registry_ = wl_display_get_registry(display_);
     wl_registry_add_listener(registry_, &reg_listener_, this);
@@ -786,12 +841,14 @@ cv_wl_buffer::~cv_wl_buffer()
 
 void cv_wl_buffer::destroy()
 {
-    if (buffer) {
-        wl_buffer_destroy(buffer);
-        buffer = nullptr;
-        width_ = 0;
-        height_ = 0;
+    if (buffer_) {
+        wl_buffer_destroy(buffer_);
+        buffer_ = nullptr;
     }
+    if (shm_data_)
+        shm_data_ = nullptr;
+    width_ = 0;
+    height_ = 0;
     shm_unlink(shm_path_.c_str());
 }
 
@@ -815,11 +872,20 @@ int cv_wl_buffer::height() const
     return height_;
 }
 
-int cv_wl_buffer::create_shm(struct wl_shm *shm, int width, int height, uint32_t format)
+bool cv_wl_buffer::is_allocated() const
+{
+    return buffer_ && shm_data_;
+}
+
+char *cv_wl_buffer::data()
+{
+    return (char *)shm_data_;
+}
+
+void cv_wl_buffer::create_shm(struct wl_shm *shm, int width, int height, uint32_t format)
 {
     int stride = width * 4;
     int size = stride * height;
-    struct wl_shm_pool *pool;
 
     this->destroy();
     this->width_ = width;
@@ -828,24 +894,25 @@ int cv_wl_buffer::create_shm(struct wl_shm *shm, int width, int height, uint32_t
     shm_path_ = "/opencv_wl_buffer-" + std::to_string(number_++);
     int fd = shm_open(shm_path_.c_str(), O_RDWR | O_CREAT, 0700);
     if (fd < 0)
-        throw_system_error("creating a buffer file failed: ", errno);
+        throw_system_error("creating a shared memory failed", errno);
 
-    if (ftruncate(fd, size) < 0)
-        throw_system_error("failed to truncate a shm buffer", errno);
-
-    shm_data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (shm_data == MAP_FAILED) {
+    if (ftruncate(fd, size) < 0) {
         close(fd);
-        throw_system_error("mmap failed: ", errno);
+        throw_system_error("failed to truncate a shm buffer", errno);
     }
 
-    pool = wl_shm_create_pool(shm, fd, size);
-    buffer =
-        wl_shm_pool_create_buffer(pool, 0, width, height, stride, format);
-    wl_buffer_add_listener(buffer, &buffer_listener_, this);
+    shm_data_ = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (shm_data_ == MAP_FAILED) {
+        close(fd);
+        this->destroy();
+        throw_system_error("mmap", errno);
+    }
+
+    struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, size);
+    buffer_ = wl_shm_pool_create_buffer(pool, 0, width, height, stride, format);
+    wl_buffer_add_listener(buffer_, &buffer_listener_, this);
     wl_shm_pool_destroy(pool);
     close(fd);
-    return 0;
 }
 
 void cv_wl_buffer::handle_buffer_release(void *data, struct wl_buffer *buffer)
@@ -854,6 +921,109 @@ void cv_wl_buffer::handle_buffer_release(void *data, struct wl_buffer *buffer)
     mybuf->busy(false);
 }
 
+void cv_wl_buffer::attach_to_surface(struct wl_surface *surface, int32_t x, int32_t y)
+{
+    wl_surface_attach(surface, buffer_, x, y);
+    this->busy();
+}
+
+
+/*
+ * cv_wl_viewer implementation
+ */
+cv_wl_viewer::cv_wl_viewer(int flags) : flags_(flags)
+{
+}
+
+std::pair<int, int> cv_wl_viewer::get_area()
+{
+    return std::make_pair(width_, height_);
+}
+
+void cv_wl_viewer::set_image(cv::Mat image)
+{
+    image_ = std::move(image);
+}
+
+cv::Size cv_wl_viewer::get_image_area()
+{
+    return image_.size();
+}
+
+bool cv_wl_viewer::set_area(int width, int height)
+{
+    width_ = width;
+    height_ = height;
+    return image_.cols == width_ && image_.rows == height_;
+}
+
+void cv_wl_viewer::draw(void *data)
+{
+    // Don't scale for now
+    assert(image_.cols == width_ && image_.rows == height_);
+
+    write_mat_to_xrgb8888(image_, data);
+}
+
+void cv_wl_viewer::write_mat_to_xrgb8888(cv::Mat const& img, void *data)
+{
+    for (int y = 0; y < img.rows; y++) {
+        for (int x = 0; x < img.cols; x++) {
+            auto p = img.at<cv::Vec3b>(y, x);
+            draw_argb8888((char *)data + (y * img.cols + x) * 4, 0xef, p[2], p[1], p[0]);
+        }
+    }
+}
+
+
+/*
+ * cv_wl_trackbar implementation
+ */
+cv_wl_trackbar::cv_wl_trackbar(std::string const& name, int *value, int count, CvTrackbarCallback2 on_change, void *data)
+    :   name_(name), value_(value), count_(count)
+{
+    on_change_.callback = on_change;
+    on_change_.data = data;
+}
+
+std::pair<int, int> cv_wl_trackbar::get_area()
+{
+    return std::make_pair(width_, height_);
+}
+
+bool cv_wl_trackbar::set_area(int width, int height)
+{
+    width_ = width;
+    height_ = height;
+    return true;
+}
+
+void cv_wl_trackbar::draw(void *data)
+{
+    // for now
+    for (int y = 0; y < height_; ++y) {
+        for (int x = 0; x < width_; ++x) {
+            if (x == 0 || y == 0 || x == width_ - 1 || y == height_ - 1)
+                draw_argb8888((char *)data + (y * width_ + x) * 4, 0x00, 0xff, 0xff, 0xff);
+        }
+    }
+}
+
+void cv_wl_trackbar::mouse_enter(int x, int y)
+{
+}
+
+void cv_wl_trackbar::mouse_leave()
+{
+}
+
+void cv_wl_trackbar::mouse_motion(uint32_t time, int x, int y)
+{
+}
+
+void cv_wl_trackbar::mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state)
+{
+}
 
 /*
  * cv_wl_window implementation
@@ -893,43 +1063,64 @@ std::pair<int, int> cv_wl_window::get_size() const
     return std::make_pair(width_, height_);
 }
 
-cv_wl_buffer& cv_wl_window::next_buffer()
+void cv_wl_window::prepare_buffer()
 {
-    cv_wl_buffer *buffer = nullptr;
-
-    while (!buffer) {
+    while (buffer_.is_busy())
         display_->roundtrip();
-        if (!buffers_[0].is_busy())
-            buffer = &buffers_[0];
-        else if (!buffers_[1].is_busy())
-            buffer = &buffers_[1];
-    }
 
-    if (!buffer->buffer || buffer->width() != width_ || buffer->height() != height_) {
-        int ret = buffer->create_shm(display_->shm(),
+    if (!buffer_.is_allocated() ||
+        buffer_.width() != width_ || buffer_.height() != height_) {
+        buffer_.create_shm(display_->shm(),
             width_, height_, WL_SHM_FORMAT_XRGB8888);
-        if (ret < 0)
-            throw std::runtime_error("cannot create shm buffer");
 
         /* paint the padding */
-        memset(buffer->shm_data, 0xff, width_ * height_ * 4);
+        std::memset(buffer_.data(), 0x00, width_ * height_ * 4);
     }
-    return *buffer;
 }
 
-void cv_wl_window::show_image(CvMat const *mat)
+void cv_wl_window::show_image(cv::Mat image)
 {
-    width_ = mat->cols;
-    height_ = mat->rows;
+    if (!viewer_)
+        viewer_ = std::make_shared<cv_wl_viewer>(flags_);
 
-    cv_wl_buffer& buffer = this->next_buffer();
+    viewer_->set_image(std::move(image));
+}
 
-    write_mat_to_xrgb8888(mat, buffer.shm_data);
+void cv_wl_window::create_trackbar(std::string const& name, int *value, int count, CvTrackbarCallback2 on_change, void *userdata)
+{
+    auto trackbar =
+        std::make_shared<cv_wl_trackbar>(
+            name, value, count, on_change, userdata
+        );
+    widgets_.emplace_back(trackbar);
+    widgets_points_.emplace_back(0, 0);
+}
 
-    wl_surface_attach(surface_, buffer.buffer, 0, 0);
+void cv_wl_window::show()
+{
+    const int tb_height = 20;
+    int tb_num = widgets_.size();
+
+    if (viewer_) {
+        auto size = viewer_->get_image_area();
+        width_ = size.width;
+        height_ = size.height + (tb_height * tb_num);
+        this->prepare_buffer();
+
+        viewer_->set_area(size.width, size.height);
+        viewer_->draw(buffer_.data() + (width_ * tb_height * tb_num * 4));
+        viewer_point_ = cv::Point(0, tb_height * tb_num);
+    }
+
+    for (int i = 0; i < tb_num; ++i) {
+        widgets_[i]->set_area(width_, tb_height);
+        widgets_[i]->draw(buffer_.data() + (width_ * tb_height * 4 * i));
+        widgets_points_[i] = cv::Point(0, (width_ * tb_height * 4 * i));
+    }
+
+    buffer_.attach_to_surface(surface_, 0, 0);
     wl_surface_damage(surface_, 0, 0, width_, height_);
     wl_surface_commit(surface_);
-    buffer.busy();
 }
 
 void cv_wl_window::set_mouse_callback(CvMouseCallback on_mouse, void *param)
@@ -948,7 +1139,9 @@ void cv_wl_window::mouse_enter(int x, int y)
 {
     on_mouse_.last_x = x;
     on_mouse_.last_y = y;
-    this->call_mouse_callback(cv::EVENT_MOUSEMOVE, x, y, 0);
+
+    if (viewer_ && viewer_point_.y <= y)
+        this->call_mouse_callback(cv::EVENT_MOUSEMOVE, x, y - viewer_point_.y, 0);
 }
 
 void cv_wl_window::mouse_leave()
@@ -972,9 +1165,13 @@ void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
         case cv_wl_mouse::MBUTTON:
             flag = cv::EVENT_FLAG_MBUTTON;
             break;
+        default:
+            break;
         }
     }
-    this->call_mouse_callback(cv::EVENT_MOUSEMOVE, x, y, flag);
+
+    if (viewer_ && viewer_point_.y <= y)
+        this->call_mouse_callback(cv::EVENT_MOUSEMOVE, x, y - viewer_point_.y, flag);
 }
 
 void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state)
@@ -995,8 +1192,12 @@ void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_butto
         event = on_mouse_.drag ? cv::EVENT_MBUTTONDOWN : cv::EVENT_MBUTTONUP;
         flag = cv::EVENT_FLAG_MBUTTON;
         break;
+    default:
+        break;
     }
-    this->call_mouse_callback(event, on_mouse_.last_x, on_mouse_.last_y, flag);
+
+    if (viewer_ && viewer_point_.y <= on_mouse_.last_y)
+        this->call_mouse_callback(event, on_mouse_.last_x, on_mouse_.last_y - viewer_point_.y, flag);
 }
 
 void cv_wl_window::handle_surface_configure(
@@ -1039,6 +1240,14 @@ void cv_wl_core::init()
 shared_ptr<cv_wl_display> cv_wl_core::display()
 {
     return display_;
+}
+
+std::vector<std::string> cv_wl_core::get_window_names() const
+{
+    std::vector<std::string> names;
+    for (auto&& e : windows_)
+        names.emplace_back(e.first);
+    return names;
 }
 
 shared_ptr<cv_wl_window> cv_wl_core::get_window(std::string const& name)
@@ -1110,7 +1319,7 @@ CV_IMPL int cvNamedWindow(const char *name, int flags)
 {
     std::cerr << BACKEND_NAME << ": " << __func__ << ": " << name << std::endl;
     if (cvInitSystem(1, (char **)&name))
-        return -1;
+        throw std::runtime_error("Failed to initialize Wayland backend");
 
     return g_core->create_window(name, flags);
 }
@@ -1158,11 +1367,19 @@ CV_IMPL void cvResizeWindow(const char* name, int width, int height)
 
 CV_IMPL int cvCreateTrackbar(const char* name_bar, const char* window_name, int* value, int count, CvTrackbarCallback on_change)
 {
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": bar=" << name_bar << " created in " << window_name << std::endl;
+    //auto window = g_core->get_window(window_name);
+
+    //window->create_trackbar(name_bar, value, count, on_change, nullptr);
     return 0;
 }
 
 CV_IMPL int cvCreateTrackbar2(const char* name_bar, const char* window_name, int* val, int count, CvTrackbarCallback2 on_notify, void* userdata)
 {
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": bar=" << name_bar << " created in " << window_name << std::endl;
+    auto window = g_core->get_window(window_name);
+
+    window->create_trackbar(name_bar, val, count, on_notify, userdata);
     return 0;
 }
 
@@ -1184,16 +1401,21 @@ CV_IMPL void cvSetMouseCallback(const char* window_name, CvMouseCallback on_mous
 
 CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
 {
-    CvMat stub;
-    CvMat *mat = cvGetMat(arr, &stub);
     auto window = g_core->get_window(name);
-    window->show_image(mat);
+
+    cv::Mat mat = cv::cvarrToMat(arr, true);
+    window->show_image(std::move(mat));
+    window->show();
 }
 
 CV_IMPL int cvWaitKey(int delay)
 {
     int key = -1;
+
     while (true) {
+        for (auto&& name : g_core->get_window_names())
+            g_core->get_window(name)->show();
+
         std::pair<uint32_t, bool> events =
             g_core->display()->run_once(delay > 0 ? delay : -1);
 
