@@ -1458,9 +1458,6 @@ CV_IMPL int cvWaitKey(int delay)
 {
     int key = -1;
 
-    for (auto&& name : g_core->get_window_names())
-        g_core->get_window(name)->show();
-
     namespace ch  = std::chrono;
     auto limit = ch::milliseconds(delay);
 
