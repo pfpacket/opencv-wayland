@@ -1062,6 +1062,8 @@ cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> display,
 
 cv_wl_window::~cv_wl_window()
 {
+    if (frame_callback_)
+        wl_callback_destroy(frame_callback_);
     xdg_surface_destroy(shell_surface_);
     wl_surface_destroy(surface_);
     std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
