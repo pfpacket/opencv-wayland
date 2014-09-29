@@ -1467,7 +1467,7 @@ CV_IMPL int cvWaitKey(int delay)
 
         std::pair<uint32_t, bool> events =
             g_core->display()->run_once(
-                limit.count() >= 0 ? limit.count() : -1);
+                limit.count() > 0 ? limit.count() : -1);
 
         if (events.first & EPOLLIN) {
             key = g_core->display()->input()->keyboard()->get_key();
@@ -1478,7 +1478,7 @@ CV_IMPL int cvWaitKey(int delay)
         // timeout
         auto end = ch::steady_clock::now();
         auto elapsed = ch::duration_cast<ch::milliseconds>(end - start);
-        if (events.second || elapsed >= limit)
+        if (events.second || (limit.count() > 0 && elapsed >= limit))
             break;
         limit -= elapsed;
     }
