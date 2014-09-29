@@ -386,6 +386,7 @@ private:
         void *param = nullptr;
     } on_mouse_;
     bool next_frame_ready_ = true;
+    bool pending_repaint_request_ = false;
     struct wl_callback *frame_callback_ = nullptr;
     struct wl_callback_listener frame_listener_{
         &handle_frame_callback
@@ -1123,8 +1124,10 @@ void cv_wl_window::create_trackbar(std::string const& name, int *value, int coun
 
 void cv_wl_window::show()
 {
-    if (!next_frame_ready_)
+    if (!next_frame_ready_) {
+        pending_repaint_request_ = true;
         return;
+    }
 
     const int tb_height = 40;
     int tb_num = widgets_.size();
@@ -1167,6 +1170,11 @@ void cv_wl_window::handle_frame_callback(void *data, struct wl_callback *cb, uin
     auto *window = reinterpret_cast<cv_wl_window *>(data);
 
     window->next_frame_ready_ = true;
+
+    if (window->pending_repaint_request_) {
+        window->pending_repaint_request_ = false;
+        window->show();
+    }
 }
 
 void cv_wl_window::set_mouse_callback(CvMouseCallback on_mouse, void *param)
