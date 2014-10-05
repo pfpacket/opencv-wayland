@@ -1083,14 +1083,13 @@ std::pair<int, int> cv_wl_window::get_size() const
 cv_wl_buffer& cv_wl_window::next_buffer()
 {
     cv_wl_buffer *buffer = nullptr;
-    while (!buffer) {
-        if (!buffers_[0].is_busy())
-            buffer = &buffers_[0];
-        else if (!buffers_[1].is_busy())
-            buffer = &buffers_[1];
-        else
-            throw std::runtime_error("Both buffers are busy, a server bug?");
-    }
+
+    if (!buffers_[0].is_busy())
+        buffer = &buffers_[0];
+    else if (!buffers_[1].is_busy())
+        buffer = &buffers_[1];
+    else
+        throw std::runtime_error("Both buffers are busy, a server bug?");
 
     if (!buffer->is_allocated() ||
         buffer->width() != width_ || buffer->height() != height_) {
