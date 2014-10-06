@@ -1,5 +1,4 @@
-//#define __OPENCV_BUILD
-//#define CV_IMPL
+
 #include "precomp.hpp"
 
 #ifndef _WIN32
@@ -58,10 +57,11 @@ class cv_wl_window;
 class cv_wl_core;
 
 using std::shared_ptr;
+using std::weak_ptr;
 extern shared_ptr<cv_wl_core> g_core;
 
 template<typename Container>
-static void container_clear(Container& cont)
+static void clear_container(Container& cont)
 {
     Container empty_container;
     std::swap(cont, empty_container);
@@ -91,6 +91,16 @@ static xkb_keycode_t xkb_keycode_from_raw_keycode(int raw_keycode)
 static void draw_argb8888(void *d, uint8_t a, uint8_t r, uint8_t g, uint8_t b)
 {
     *((uint32_t *)d) = ((a << 24) | (r << 16) | (g << 8) | b);
+}
+
+static void write_mat_to_xrgb8888(cv::Mat const& img, void *data)
+{
+    for (int y = 0; y < img.rows; y++) {
+        for (int x = 0; x < img.cols; x++) {
+            auto p = img.at<cv::Vec3b>(y, x);
+            draw_argb8888((char *)data + (y * img.cols + x) * 4, 0x00, p[2], p[1], p[0]);
+        }
+    }
 }
 
 class epoller {
@@ -134,7 +144,8 @@ public:
     std::vector<struct epoll_event> wait(int timeout = -1, int max_events = 16)
     {
         std::vector<struct epoll_event> events(max_events);
-        int event_num = epoll_wait(epoll_fd_, events.data(), events.size(), timeout);
+        int event_num = epoll_wait(epoll_fd_,
+            events.data(), events.size(), timeout);
         if (event_num < 0)
             throw_system_error("epoll_wait", errno);
         events.erase(events.begin() + event_num, events.end());
@@ -174,7 +185,9 @@ private:
     epoller poller_;
     struct wl_display *display_;
     struct wl_registry *registry_;
-    struct wl_registry_listener reg_listener_{&handle_reg_global, &handle_reg_remove};
+    struct wl_registry_listener reg_listener_{
+        &handle_reg_global, &handle_reg_remove
+    };
     struct wl_compositor *compositor_ = nullptr;
     struct wl_shm *shm_ = nullptr;
     struct wl_shm_listener shm_listener_{&handle_shm_format};
@@ -223,7 +236,7 @@ public:
     cv_wl_keyboard(struct wl_keyboard *keyboard);
     ~cv_wl_keyboard();
 
-    int get_key();
+    std::queue<int> get_queued_keys();
 
 private:
     struct {
@@ -301,6 +314,10 @@ private:
 
 class cv_wl_widget {
 public:
+    cv_wl_widget(weak_ptr<cv_wl_window> const& window)
+        :   window_(window)
+    {
+    }
     virtual ~cv_wl_widget() {}
     virtual std::pair<int, int> get_area() = 0;
     virtual bool set_area(int width, int height) = 0;
@@ -309,11 +326,14 @@ public:
     virtual void mouse_leave() {}
     virtual void mouse_motion(uint32_t time, int x, int y) {}
     virtual void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state) {}
+
+protected:
+    weak_ptr<cv_wl_window> window_;
 };
 
 class cv_wl_viewer : public cv_wl_widget {
 public:
-    cv_wl_viewer(int flags);
+    cv_wl_viewer(weak_ptr<cv_wl_window> const&, int flags);
     void set_image(cv::Mat image);
     cv::Size get_image_area();
     std::pair<int, int> get_area() override;
@@ -324,32 +344,139 @@ private:
     int flags_;
     cv::Mat image_;
     int width_, height_;
-
-    static void write_mat_to_xrgb8888(cv::Mat const& img, void *data);
 };
 
 class cv_wl_trackbar : public cv_wl_widget {
 public:
-    cv_wl_trackbar(std::string const& name, int *value, int count, CvTrackbarCallback2 on_change, void *data);
-    std::pair<int, int> get_area() override;
-    bool set_area(int width, int height) override;
-    void draw(void *data) override;
-    void mouse_enter(int x, int y) override;
-    void mouse_leave() override;
+    //cv_wl_trackbar(weak_ptr<cv_wl_window> const& window, std::string const& name,
+    //    int *value, int count, CvTrackbarCallback2 on_change, void *data);
+    //std::string const& name() const;
+    //int get_pos() const;
+    //void set_pos(int value);
+    //std::pair<int, int> get_area() override;
+    //bool set_area(int width, int height) override;
+    //void draw(void *data) override;
+    //void mouse_enter(int x, int y) override;
+    //void mouse_leave() override;
+    //void mouse_motion(uint32_t time, int x, int y) override;
+    //void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state) override;
+
+    cv_wl_trackbar(weak_ptr<cv_wl_window> const& window, std::string const& name,
+        int *value, int count, CvTrackbarCallback2 on_change, void *data)
+        :   cv_wl_widget(window), name_(name), value_(value), count_(count)
+    {
+        on_change_.callback = on_change;
+        on_change_.data = data;
+        //cvInitFont(&bar_.font, bar_.fontface, 1.0, 1.0, 0.0, bar_.font_thickness, CV_AA);
+    }
+
+    std::string const& name() const
+    {
+        return name_;
+    }
+
+    int get_pos() const
+    {
+        return slider_.value;
+    }
+
+    void set_pos(int value);
+
+    std::pair<int, int> get_area() override
+    {
+        return std::make_pair(width_, height_);
+    }
+
+    bool set_area(int width, int height) override
+    {
+        if (width_ != width || height_ != height) {
+            width_ = width;
+            height_ = height;
+
+            bar_.text_size = cv::getTextSize(
+                name_.c_str(), bar_.fontface,
+                bar_.fontscale, bar_.font_thickness, nullptr);
+            bar_.text_orig = cv::Point(2, (height_ + bar_.text_size.height) / 2);
+            bar_.left = cv::Point(bar_.text_size.width + 10, height_ / 2);
+            bar_.right = cv::Point(width_ - bar_.margin - 1, height_ / 2);
+
+            int slider_pos_x = (((double)bar_.length() / count_) * slider_.value);
+            slider_.pos = cv::Point(bar_.left.x + slider_pos_x, bar_.left.y);
+        }
+        return true;
+    }
+
+    void draw(void *data) override
+    {
+        data_ = cv::Mat(height_, width_, CV_8UC3, CV_RGB(0xde, 0xde, 0xde));
+
+        cv::putText(data_, name_.c_str(), bar_.text_orig, bar_.fontface,
+            bar_.fontscale, CV_RGB(0x00, 0x00, 0x00), bar_.font_thickness);
+
+        cv::line(data_, bar_.left, bar_.right, color_.bg, bar_.thickness + 3, CV_AA);
+        cv::line(data_, bar_.left, bar_.right, color_.fg, bar_.thickness, CV_AA);
+        cv::circle(data_, slider_.pos, slider_.radius, color_.fg, -1, CV_AA);
+        cv::circle(data_, slider_.pos, slider_.radius, color_.bg, 1, CV_AA);
+
+        write_mat_to_xrgb8888(data_, data);
+        slider_moved_ = false;
+    }
+
+    void mouse_enter(int x, int y) override
+    {
+    }
+
+    void mouse_leave() override
+    {
+    }
+
     void mouse_motion(uint32_t time, int x, int y) override;
-    void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state) override;
+
+    void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state) override
+    {
+    }
 
 private:
     std::string name_;
     int *value_, count_;
     int width_, height_;
+
     struct {
         CvTrackbarCallback2 callback;
         void *data;
+        void call(int v) { if (callback) callback(v, data); }
     } on_change_;
+
+    struct {
+        cv::Scalar bg = CV_RGB(0xa4, 0xa4, 0xa4);
+        cv::Scalar fg = CV_RGB(0xf0, 0xf0, 0xf0);
+    } color_;
+
+    struct {
+        int fontface = cv::FONT_HERSHEY_COMPLEX_SMALL;
+        double fontscale = 0.5;
+        int font_thickness = 1;
+        cv::Size text_size;
+        cv::Point text_orig;
+
+        int margin = 10, thickness = 5;
+        cv::Point right, left;
+        int length() const { return right.x - left.x; }
+    } bar_;
+
+    struct {
+        int value = 0;
+        int radius = 7;
+        cv::Point pos;
+        bool dragging = false;
+    } slider_;
+
+    bool slider_moved_ = true;
+    cv::Mat data_;
 };
 
-class cv_wl_window {
+class cv_wl_window
+    : public std::enable_shared_from_this<cv_wl_window> {
 public:
     enum {
         default_width = 320,
@@ -365,6 +492,8 @@ public:
 
     void show_image(cv::Mat image);
     void create_trackbar(std::string const& name, int *value, int count, CvTrackbarCallback2 on_change, void *userdata);
+    int get_track_pos(std::string const&) const;
+    void set_track_pos(std::string const&, int);
     void show();
 
     void set_mouse_callback(CvMouseCallback on_mouse, void *param);
@@ -384,6 +513,10 @@ private:
 
         CvMouseCallback callback = nullptr;
         void *param = nullptr;
+        void call(int event, int x, int y, int flag) {
+            if (callback)
+                callback(event, x, y, flag, param);
+        }
     } on_mouse_;
     bool next_frame_ready_ = true;
     bool pending_repaint_request_ = false;
@@ -403,13 +536,12 @@ private:
 
     shared_ptr<cv_wl_viewer> viewer_;
     cv::Point viewer_point_{0, 0};
-    std::vector<shared_ptr<cv_wl_widget>> widgets_;
+    std::vector<shared_ptr<cv_wl_trackbar>> widgets_;
     std::vector<cv::Point> widgets_points_;
 
 
     cv_wl_buffer& next_buffer();
 
-    void call_mouse_callback(int event, int x, int y, int flag);
     static void handle_surface_configure(void *, struct xdg_surface *, int32_t, int32_t, struct wl_array *, uint32_t);
     static void handle_surface_close(void *data, struct xdg_surface *xdg_surface);
     static void handle_frame_callback(void *data, struct wl_callback *cb, uint32_t time);
@@ -693,55 +825,44 @@ cv_wl_keyboard::~cv_wl_keyboard()
     std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
-int cv_wl_keyboard::get_key()
+std::queue<int> cv_wl_keyboard::get_queued_keys()
 {
-    int key = -1;
-    if (!key_queue_.empty()) {
-        key = key_queue_.back();
-        std::cerr << BACKEND_NAME << ": " << __func__ << ": keycode="
-            << std::hex << key << std::dec << " dequeued" << std::endl;
-    }
-    container_clear(key_queue_);
-    return key;
+    return std::move(key_queue_);
 }
 
 void cv_wl_keyboard::handle_kb_keymap(void *data, struct wl_keyboard *kb, uint32_t format, int fd, uint32_t size)
 {
     auto *keyboard = reinterpret_cast<cv_wl_keyboard *>(data);
 
-    if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
+    try {
+        if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1)
+            throw std::runtime_error("XKB_V1 keymap format unavailable");
+
+        char *map_str = (char *)mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+        if (map_str == MAP_FAILED)
+            throw std::runtime_error("Failed to mmap keymap");
+
+        keyboard->xkb_.keymap = xkb_keymap_new_from_string(
+            keyboard->xkb_.ctx, map_str, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+        munmap(map_str, size);
+        if (!keyboard->xkb_.keymap)
+            throw std::runtime_error("Failed to compile keymap");
         close(fd);
-        return;
-    }
 
-    char *map_str = (char *)mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
-    if (map_str == MAP_FAILED) {
+        keyboard->xkb_.state = xkb_state_new(keyboard->xkb_.keymap);
+        if (!keyboard->xkb_.state)
+            throw std::runtime_error("failed to create XKB state");
+
+        keyboard->xkb_.control_mask =
+            1 << xkb_keymap_mod_get_index(keyboard->xkb_.keymap, "Control");
+        keyboard->xkb_.alt_mask =
+            1 << xkb_keymap_mod_get_index(keyboard->xkb_.keymap, "Mod1");
+        keyboard->xkb_.shift_mask =
+            1 << xkb_keymap_mod_get_index(keyboard->xkb_.keymap, "Shift");
+    } catch (std::exception& e) {
+        std::cerr << BACKEND_NAME << ": " << __func__ << ": " << e.what() << std::endl;
         close(fd);
-        return;
     }
-
-    keyboard->xkb_.keymap = xkb_keymap_new_from_string(
-        keyboard->xkb_.ctx, map_str, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
-    munmap(map_str, size);
-    close(fd);
-    if (!keyboard->xkb_.keymap) {
-        std::cerr << "failed to compile keymap" << std::endl;
-        return;
-    }
-
-    keyboard->xkb_.state = xkb_state_new(keyboard->xkb_.keymap);
-    if (!keyboard->xkb_.state) {
-        std::cerr << "failed to create XKB state" << std::endl;
-        xkb_keymap_unref(keyboard->xkb_.keymap);
-        return;
-    }
-
-    keyboard->xkb_.control_mask =
-        1 << xkb_keymap_mod_get_index(keyboard->xkb_.keymap, "Control");
-    keyboard->xkb_.alt_mask =
-        1 << xkb_keymap_mod_get_index(keyboard->xkb_.keymap, "Mod1");
-    keyboard->xkb_.shift_mask =
-        1 << xkb_keymap_mod_get_index(keyboard->xkb_.keymap, "Shift");
 }
 
 void cv_wl_keyboard::handle_kb_enter(void *data, struct wl_keyboard *keyboard, uint32_t serial, struct wl_surface *surface, struct wl_array *keys)
@@ -940,7 +1061,8 @@ void cv_wl_buffer::handle_buffer_release(void *data, struct wl_buffer *buffer)
 /*
  * cv_wl_viewer implementation
  */
-cv_wl_viewer::cv_wl_viewer(int flags) : flags_(flags)
+cv_wl_viewer::cv_wl_viewer(weak_ptr<cv_wl_window> const& window, int flags)
+    :   cv_wl_widget(window), flags_(flags)
 {
 }
 
@@ -980,65 +1102,27 @@ void cv_wl_viewer::draw(void *data)
     write_mat_to_xrgb8888(image_, data);
 }
 
-void cv_wl_viewer::write_mat_to_xrgb8888(cv::Mat const& img, void *data)
-{
-    for (int y = 0; y < img.rows; y++) {
-        for (int x = 0; x < img.cols; x++) {
-            auto p = img.at<cv::Vec3b>(y, x);
-            draw_argb8888((char *)data + (y * img.cols + x) * 4, 0xef, p[2], p[1], p[0]);
-        }
-    }
-}
-
 
 /*
  * cv_wl_trackbar implementation
  */
-cv_wl_trackbar::cv_wl_trackbar(std::string const& name, int *value, int count, CvTrackbarCallback2 on_change, void *data)
-    :   name_(name), value_(value), count_(count)
+void cv_wl_trackbar::set_pos(int value)
 {
-    on_change_.callback = on_change;
-    on_change_.data = data;
-}
-
-std::pair<int, int> cv_wl_trackbar::get_area()
-{
-    return std::make_pair(width_, height_);
-}
-
-bool cv_wl_trackbar::set_area(int width, int height)
-{
-    width_ = width;
-    height_ = height;
-    return true;
-}
-
-void cv_wl_trackbar::draw(void *data)
-{
-    // for now
-    for (int y = 0; y < height_; ++y) {
-        for (int x = 0; x < width_; ++x) {
-            if (x == 0 || y == 0 || x == width_ - 1 || y == height_ - 1)
-                draw_argb8888((char *)data + (y * width_ + x) * 4, 0x00, 0xff, 0xff, 0xff);
-        }
-    }
-}
-
-void cv_wl_trackbar::mouse_enter(int x, int y)
-{
-}
-
-void cv_wl_trackbar::mouse_leave()
-{
+    slider_.value = value;
+    slider_moved_ = true;
+    window_.lock()->show();
 }
 
 void cv_wl_trackbar::mouse_motion(uint32_t time, int x, int y)
 {
+    if (bar_.left.x < x && x < bar_.right.x) {
+        slider_.pos = cv::Point(x, bar_.left.y);
+        slider_.value = (double)(x - bar_.left.x) / bar_.length() * count_;
+        slider_moved_ = true;
+        window_.lock()->show();
+    }
 }
 
-void cv_wl_trackbar::mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state)
-{
-}
 
 /*
  * cv_wl_window implementation
@@ -1106,7 +1190,8 @@ cv_wl_buffer& cv_wl_window::next_buffer()
 void cv_wl_window::show_image(cv::Mat image)
 {
     if (!viewer_)
-        viewer_ = std::make_shared<cv_wl_viewer>(flags_);
+        viewer_ = std::make_shared<cv_wl_viewer>(
+                    this->shared_from_this(), flags_);
 
     viewer_->set_image(std::move(image));
 }
@@ -1115,10 +1200,30 @@ void cv_wl_window::create_trackbar(std::string const& name, int *value, int coun
 {
     auto trackbar =
         std::make_shared<cv_wl_trackbar>(
-            name, value, count, on_change, userdata
+            this->shared_from_this(), name,
+            value, count, on_change, userdata
         );
     widgets_.emplace_back(trackbar);
     widgets_points_.emplace_back(0, 0);
+}
+
+int cv_wl_window::get_track_pos(std::string const& bar_name) const
+{
+    auto it = std::find_if(widgets_.begin(), widgets_.end(),
+        [&bar_name](shared_ptr<cv_wl_trackbar> tb) {
+            return tb->name() == bar_name;
+        });
+    return it == widgets_.end() ? -1 : (*it)->get_pos();
+}
+
+void cv_wl_window::set_track_pos(std::string const& bar_name, int value)
+{
+    auto it = std::find_if(widgets_.begin(), widgets_.end(),
+        [&bar_name](shared_ptr<cv_wl_trackbar> tb) {
+            return tb->name() == bar_name;
+        });
+    if (it != widgets_.end())
+        (*it)->set_pos(value);
 }
 
 void cv_wl_window::show()
@@ -1182,23 +1287,30 @@ void cv_wl_window::set_mouse_callback(CvMouseCallback on_mouse, void *param)
     on_mouse_.param = param;
 }
 
-void cv_wl_window::call_mouse_callback(int event, int x, int y, int flag)
-{
-    if (on_mouse_.callback)
-        on_mouse_.callback(event, x, y, flag, on_mouse_.param);
-}
-
 void cv_wl_window::mouse_enter(int x, int y)
 {
     on_mouse_.last_x = x;
     on_mouse_.last_y = y;
 
+    for (size_t i = 0; i < widgets_.size(); ++i) {
+        auto area = widgets_[i]->get_area();
+        auto&& p = widgets_points_[i];
+        if (p.y <= y && y <= p.y + area.second)
+            widgets_[i]->mouse_enter(x, y - p.y);
+    }
+
     if (viewer_ && viewer_point_.y <= y)
-        this->call_mouse_callback(cv::EVENT_MOUSEMOVE, x, y - viewer_point_.y, 0);
+        on_mouse_.call(cv::EVENT_MOUSEMOVE, x, y - viewer_point_.y, 0);
 }
 
 void cv_wl_window::mouse_leave()
 {
+    for (size_t i = 0; i < widgets_.size(); ++i) {
+        auto area = widgets_[i]->get_area();
+        auto&& p = widgets_points_[i];
+        if (p.y <= on_mouse_.last_y && on_mouse_.last_y <= p.y + area.second)
+            widgets_[i]->mouse_leave();
+    }
 }
 
 void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
@@ -1223,8 +1335,15 @@ void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
         }
     }
 
+    for (size_t i = 0; i < widgets_.size(); ++i) {
+        auto area = widgets_[i]->get_area();
+        auto&& p = widgets_points_[i];
+        if (p.y <= y && y <= p.y + area.second)
+            widgets_[i]->mouse_motion(time, x, y - p.y);
+    }
+
     if (viewer_ && viewer_point_.y <= y)
-        this->call_mouse_callback(cv::EVENT_MOUSEMOVE, x, y - viewer_point_.y, flag);
+        on_mouse_.call(cv::EVENT_MOUSEMOVE, x, y - viewer_point_.y, flag);
 }
 
 void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state)
@@ -1249,8 +1368,15 @@ void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_butto
         break;
     }
 
+    for (size_t i = 0; i < widgets_.size(); ++i) {
+        auto area = widgets_[i]->get_area();
+        auto const& p = widgets_points_[i];
+        if (p.y <= on_mouse_.last_y && on_mouse_.last_y <= p.y + area.second)
+            widgets_[i]->mouse_button(time, button, state);
+    }
+
     if (viewer_ && viewer_point_.y <= on_mouse_.last_y)
-        this->call_mouse_callback(event, on_mouse_.last_x, on_mouse_.last_y - viewer_point_.y, flag);
+        on_mouse_.call(event, on_mouse_.last_x, on_mouse_.last_y - viewer_point_.y, flag);
 }
 
 void cv_wl_window::handle_surface_configure(
@@ -1379,13 +1505,11 @@ CV_IMPL int cvNamedWindow(const char *name, int flags)
 
 CV_IMPL void cvDestroyWindow(const char* name)
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": " << name << std::endl;
     g_core->destroy_window(name);
 }
 
 CV_IMPL void cvDestroyAllWindows()
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << std::endl;
     g_core->destroy_all_windows();
 }
 
@@ -1402,6 +1526,7 @@ CV_IMPL const char* cvGetWindowName(void* window_handle)
 
 CV_IMPL void cvMoveWindow(const char* name, int x, int y)
 {
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": " << name << std::endl;
     /*
      * We cannot move window surfaces in Wayland
      * Only a wayland compositor is allowed to do it
@@ -1411,6 +1536,7 @@ CV_IMPL void cvMoveWindow(const char* name, int x, int y)
 
 CV_IMPL void cvResizeWindow(const char* name, int width, int height)
 {
+    std::cerr << BACKEND_NAME << ": " << __func__ << ": " << name << std::endl;
     /*
      * We cannot resize window surfaces in Wayland
      * Only a wayland compositor is allowed to do it
@@ -1420,7 +1546,6 @@ CV_IMPL void cvResizeWindow(const char* name, int width, int height)
 
 CV_IMPL int cvCreateTrackbar(const char* name_bar, const char* window_name, int* value, int count, CvTrackbarCallback on_change)
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": bar=" << name_bar << " created in " << window_name << std::endl;
     //auto window = g_core->get_window(window_name);
 
     //window->create_trackbar(name_bar, value, count, on_change, nullptr);
@@ -1429,7 +1554,6 @@ CV_IMPL int cvCreateTrackbar(const char* name_bar, const char* window_name, int*
 
 CV_IMPL int cvCreateTrackbar2(const char* name_bar, const char* window_name, int* val, int count, CvTrackbarCallback2 on_notify, void* userdata)
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": bar=" << name_bar << " created in " << window_name << std::endl;
     auto window = g_core->get_window(window_name);
 
     window->create_trackbar(name_bar, val, count, on_notify, userdata);
@@ -1438,11 +1562,16 @@ CV_IMPL int cvCreateTrackbar2(const char* name_bar, const char* window_name, int
 
 CV_IMPL int cvGetTrackbarPos(const char* name_bar, const char* window_name)
 {
-    return 0;
+    auto window = g_core->get_window(window_name);
+
+    return window->get_track_pos(name_bar);
 }
 
 CV_IMPL void cvSetTrackbarPos(const char* name_bar, const char* window_name, int pos)
 {
+    auto window = g_core->get_window(window_name);
+
+    window->set_track_pos(name_bar, pos);
 }
 
 CV_IMPL void cvSetMouseCallback(const char* window_name, CvMouseCallback on_mouse, void* param)
@@ -1476,9 +1605,12 @@ CV_IMPL int cvWaitKey(int delay)
                 limit.count() > 0 ? limit.count() : -1);
 
         if (events.first & EPOLLIN) {
-            key = g_core->display()->input()->keyboard()->get_key();
-            if (key >= 0)
+            auto&& key_queue =
+                g_core->display()->input()->keyboard()->get_queued_keys();
+            if (!key_queue.empty()) {
+                key = key_queue.back();
                 break;
+            }
         }
 
         // timeout
