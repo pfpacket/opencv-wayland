@@ -345,76 +345,15 @@ private:
 
 class cv_wl_trackbar : public cv_wl_widget {
 public:
-    //cv_wl_trackbar(weak_ptr<cv_wl_window> const& window, std::string const& name,
-    //    int *value, int count, CvTrackbarCallback2 on_change, void *data);
-    //std::string const& name() const;
-    //int get_pos() const;
-    //void set_pos(int value);
-    //std::pair<int, int> get_area() override;
-    //bool set_area(int width, int height) override;
-    //void draw(void *data) override;
-
     cv_wl_trackbar(weak_ptr<cv_wl_window> const& window, std::string const& name,
-        int *value, int count, CvTrackbarCallback2 on_change, void *data)
-        :   cv_wl_widget(window), name_(name), value_(value), count_(count)
-    {
-        on_change_.callback = on_change;
-        on_change_.data = data;
-        //cvInitFont(&bar_.font, bar_.fontface, 1.0, 1.0, 0.0, bar_.font_thickness, CV_AA);
-    }
+        int *value, int count, CvTrackbarCallback2 on_change, void *data);
 
-    std::string const& name() const
-    {
-        return name_;
-    }
-
-    int get_pos() const
-    {
-        return slider_.value;
-    }
-
-    void set_pos(int value);
-
-    std::pair<int, int> get_area() override
-    {
-        return std::make_pair(width_, height_);
-    }
-
-    bool set_area(int width, int height) override
-    {
-        if (width_ != width || height_ != height) {
-            width_ = width;
-            height_ = height;
-
-            bar_.text_size = cv::getTextSize(
-                name_.c_str(), bar_.fontface,
-                bar_.fontscale, bar_.font_thickness, nullptr);
-            bar_.text_orig = cv::Point(2, (height_ + bar_.text_size.height) / 2);
-            bar_.left = cv::Point(bar_.text_size.width + 10, height_ / 2);
-            bar_.right = cv::Point(width_ - bar_.margin - 1, height_ / 2);
-
-            int slider_pos_x = (((double)bar_.length() / count_) * slider_.value);
-            slider_.pos = cv::Point(bar_.left.x + slider_pos_x, bar_.left.y);
-        }
-        return true;
-    }
-
-    void draw(void *data) override
-    {
-        data_ = cv::Mat(height_, width_, CV_8UC3, CV_RGB(0xde, 0xde, 0xde));
-
-        cv::putText(data_, name_.c_str(), bar_.text_orig, bar_.fontface,
-            bar_.fontscale, CV_RGB(0x00, 0x00, 0x00), bar_.font_thickness);
-
-        cv::line(data_, bar_.left, bar_.right, color_.bg, bar_.thickness + 3, CV_AA);
-        cv::line(data_, bar_.left, bar_.right, color_.fg, bar_.thickness, CV_AA);
-        cv::circle(data_, slider_.pos, slider_.radius, color_.fg, -1, CV_AA);
-        cv::circle(data_, slider_.pos, slider_.radius, color_.bg, 1, CV_AA);
-
-        write_mat_to_xrgb8888(data_, data);
-        slider_moved_ = false;
-    }
-
+    std::string const& name() const;
+    int get_pos() const;
+    void set_pos(int value);;
+    std::pair<int, int> get_area() override;
+    bool set_area(int width, int height) override;
+    void draw(void *data) override;
     void on_mouse(int event, int x, int y, int flag) override;
 
 private:
@@ -1087,11 +1026,69 @@ void cv_wl_viewer::draw(void *data)
 /*
  * cv_wl_trackbar implementation
  */
+cv_wl_trackbar::cv_wl_trackbar(weak_ptr<cv_wl_window> const& window, std::string const& name,
+    int *value, int count, CvTrackbarCallback2 on_change, void *data)
+    :   cv_wl_widget(window), name_(name), value_(value), count_(count)
+{
+    on_change_.callback = on_change;
+    on_change_.data = data;
+}
+
+std::string const& cv_wl_trackbar::name() const
+{
+    return name_;
+}
+
+int cv_wl_trackbar::get_pos() const
+{
+    return slider_.value;
+}
+
 void cv_wl_trackbar::set_pos(int value)
 {
     slider_.value = value;
     slider_moved_ = true;
     window_.lock()->show();
+}
+
+std::pair<int, int> cv_wl_trackbar::get_area()
+{
+    return std::make_pair(width_, height_);
+}
+
+bool cv_wl_trackbar::set_area(int width, int height)
+{
+    if (width_ != width || height_ != height) {
+        width_ = width;
+        height_ = height;
+
+        bar_.text_size = cv::getTextSize(
+            name_.c_str(), bar_.fontface,
+            bar_.fontscale, bar_.font_thickness, nullptr);
+        bar_.text_orig = cv::Point(2, (height_ + bar_.text_size.height) / 2);
+        bar_.left = cv::Point(bar_.text_size.width + 10, height_ / 2);
+        bar_.right = cv::Point(width_ - bar_.margin - 1, height_ / 2);
+
+        int slider_pos_x = (((double)bar_.length() / count_) * slider_.value);
+        slider_.pos = cv::Point(bar_.left.x + slider_pos_x, bar_.left.y);
+    }
+    return true;
+}
+
+void cv_wl_trackbar::draw(void *data)
+{
+    data_ = cv::Mat(height_, width_, CV_8UC3, CV_RGB(0xde, 0xde, 0xde));
+
+    cv::putText(data_, name_.c_str(), bar_.text_orig, bar_.fontface,
+        bar_.fontscale, CV_RGB(0x00, 0x00, 0x00), bar_.font_thickness);
+
+    cv::line(data_, bar_.left, bar_.right, color_.bg, bar_.thickness + 3, CV_AA);
+    cv::line(data_, bar_.left, bar_.right, color_.fg, bar_.thickness, CV_AA);
+    cv::circle(data_, slider_.pos, slider_.radius, color_.fg, -1, CV_AA);
+    cv::circle(data_, slider_.pos, slider_.radius, color_.bg, 1, CV_AA);
+
+    write_mat_to_xrgb8888(data_, data);
+    slider_moved_ = false;
 }
 
 void cv_wl_trackbar::on_mouse(int event, int x, int y, int flag)
@@ -1461,11 +1458,10 @@ shared_ptr<cv_wl_core> g_core;
 CV_IMPL int cvInitSystem(int argc, char **argv)
 {
     if (!g_core) try {
-        std::cerr << BACKEND_NAME << ": Initializing backend" << std::endl;
-
         g_core = std::make_shared<cv_wl_core>();
         if (!g_core)
             throw std::runtime_error("Could not allocate memory for display");
+
         g_core->init();
     } catch (std::exception& e) {
         throw std::runtime_error(std::string("Wayland backend: ") + e.what());
@@ -1478,13 +1474,11 @@ CV_IMPL int cvInitSystem(int argc, char **argv)
 
 CV_IMPL int cvStartWindowThread()
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << std::endl;
     return 0;
 }
 
 CV_IMPL int cvNamedWindow(const char *name, int flags)
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": " << name << std::endl;
     if (cvInitSystem(1, (char **)&name))
         throw std::runtime_error("Failed to initialize Wayland backend");
 
@@ -1503,7 +1497,6 @@ CV_IMPL void cvDestroyAllWindows()
 
 CV_IMPL void* cvGetWindowHandle(const char* name)
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": " << name << std::endl;
     return g_core->get_window_handle(name);
 }
 
@@ -1514,7 +1507,6 @@ CV_IMPL const char* cvGetWindowName(void* window_handle)
 
 CV_IMPL void cvMoveWindow(const char* name, int x, int y)
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": " << name << std::endl;
     /*
      * We cannot move window surfaces in Wayland
      * Only a wayland compositor is allowed to do it
@@ -1524,7 +1516,6 @@ CV_IMPL void cvMoveWindow(const char* name, int x, int y)
 
 CV_IMPL void cvResizeWindow(const char* name, int width, int height)
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": " << name << std::endl;
     /*
      * We cannot resize window surfaces in Wayland
      * Only a wayland compositor is allowed to do it
