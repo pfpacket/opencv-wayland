@@ -1,11 +1,15 @@
 TODOs of Wayland port
 
 What is not implemented:
- * Trackbar - cvCreateTrackbar()
- * Compositing all elements
+ * Image scaling
+ * Window resizing
+
+What should be done:
  * Tests
+ * UI thread support - cvStartWindowThread()
 
 What is currently working:
  * Showing image - cvShowImage()
  * Keyboard key handling - cvWaitKey()
  * Mouse callback - cvSetMouseCallback()
+ * Trackbar - cvCreateTrackbar()
