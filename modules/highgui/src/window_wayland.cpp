@@ -322,10 +322,7 @@ public:
     virtual std::pair<int, int> get_area() = 0;
     virtual bool set_area(int width, int height) = 0;
     virtual void draw(void *data) = 0;
-    virtual void mouse_enter(int x, int y) {}
-    virtual void mouse_leave() {}
-    virtual void mouse_motion(uint32_t time, int x, int y) {}
-    virtual void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state) {}
+    virtual void on_mouse(int event, int x, int y, int flag) {}
 
 protected:
     weak_ptr<cv_wl_window> window_;
@@ -356,10 +353,6 @@ public:
     //std::pair<int, int> get_area() override;
     //bool set_area(int width, int height) override;
     //void draw(void *data) override;
-    //void mouse_enter(int x, int y) override;
-    //void mouse_leave() override;
-    //void mouse_motion(uint32_t time, int x, int y) override;
-    //void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state) override;
 
     cv_wl_trackbar(weak_ptr<cv_wl_window> const& window, std::string const& name,
         int *value, int count, CvTrackbarCallback2 on_change, void *data)
@@ -422,19 +415,7 @@ public:
         slider_moved_ = false;
     }
 
-    void mouse_enter(int x, int y) override
-    {
-    }
-
-    void mouse_leave() override
-    {
-    }
-
-    void mouse_motion(uint32_t time, int x, int y) override;
-
-    void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state) override
-    {
-    }
+    void on_mouse(int event, int x, int y, int flag) override;
 
 private:
     std::string name_;
@@ -454,7 +435,7 @@ private:
 
     struct {
         int fontface = cv::FONT_HERSHEY_COMPLEX_SMALL;
-        double fontscale = 0.5;
+        double fontscale = 0.6;
         int font_thickness = 1;
         cv::Size text_size;
         cv::Point text_orig;
@@ -1113,13 +1094,20 @@ void cv_wl_trackbar::set_pos(int value)
     window_.lock()->show();
 }
 
-void cv_wl_trackbar::mouse_motion(uint32_t time, int x, int y)
+void cv_wl_trackbar::on_mouse(int event, int x, int y, int flag)
 {
-    if (bar_.left.x < x && x < bar_.right.x) {
-        slider_.pos = cv::Point(x, bar_.left.y);
-        slider_.value = (double)(x - bar_.left.x) / bar_.length() * count_;
-        slider_moved_ = true;
-        window_.lock()->show();
+    switch (event) {
+    case cv::EVENT_MOUSEMOVE:
+        if (!(flag & cv::EVENT_FLAG_LBUTTON))
+            break;
+    case cv::EVENT_LBUTTONDOWN:
+    case cv::EVENT_LBUTTONUP:
+        if (bar_.left.x < x && x < bar_.right.x) {
+            slider_.pos = cv::Point(x, bar_.left.y);
+            slider_.value = (double)(x - bar_.left.x) / bar_.length() * count_;
+            slider_moved_ = true;
+            window_.lock()->show();
+        }
     }
 }
 
@@ -1247,7 +1235,7 @@ void cv_wl_window::show()
     for (int i = 0; i < tb_num; ++i) {
         widgets_[i]->set_area(width_, tb_height);
         widgets_[i]->draw(buffer.data() + (width_ * tb_height * 4 * i));
-        widgets_points_[i] = cv::Point(0, (width_ * tb_height * 4 * i));
+        widgets_points_[i] = cv::Point(0, (tb_height * i));
     }
 
     if (viewer_) {
@@ -1296,7 +1284,7 @@ void cv_wl_window::mouse_enter(int x, int y)
         auto area = widgets_[i]->get_area();
         auto&& p = widgets_points_[i];
         if (p.y <= y && y <= p.y + area.second)
-            widgets_[i]->mouse_enter(x, y - p.y);
+            widgets_[i]->on_mouse(cv::EVENT_MOUSEMOVE, x, y - p.y, 0);
     }
 
     if (viewer_ && viewer_point_.y <= y)
@@ -1309,7 +1297,7 @@ void cv_wl_window::mouse_leave()
         auto area = widgets_[i]->get_area();
         auto&& p = widgets_points_[i];
         if (p.y <= on_mouse_.last_y && on_mouse_.last_y <= p.y + area.second)
-            widgets_[i]->mouse_leave();
+            widgets_[i]->on_mouse(0, on_mouse_.last_x, on_mouse_.last_y - p.y, 0);
     }
 }
 
@@ -1339,7 +1327,7 @@ void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
         auto area = widgets_[i]->get_area();
         auto&& p = widgets_points_[i];
         if (p.y <= y && y <= p.y + area.second)
-            widgets_[i]->mouse_motion(time, x, y - p.y);
+            widgets_[i]->on_mouse(cv::EVENT_MOUSEMOVE, x, y - p.y, flag);
     }
 
     if (viewer_ && viewer_point_.y <= y)
@@ -1372,7 +1360,7 @@ void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_butto
         auto area = widgets_[i]->get_area();
         auto const& p = widgets_points_[i];
         if (p.y <= on_mouse_.last_y && on_mouse_.last_y <= p.y + area.second)
-            widgets_[i]->mouse_button(time, button, state);
+            widgets_[i]->on_mouse(event, on_mouse_.last_x, on_mouse_.last_y - p.y, flag);
     }
 
     if (viewer_ && viewer_point_.y <= on_mouse_.last_y)
