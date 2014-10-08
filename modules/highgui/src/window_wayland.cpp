@@ -1474,6 +1474,9 @@ CV_IMPL int cvInitSystem(int argc, char **argv)
 
 CV_IMPL int cvStartWindowThread()
 {
+    if (cvInitSystem(0, NULL))
+        throw std::runtime_error("Failed to initialize Wayland backend");
+
     return 0;
 }
 
@@ -1487,21 +1490,33 @@ CV_IMPL int cvNamedWindow(const char *name, int flags)
 
 CV_IMPL void cvDestroyWindow(const char* name)
 {
+    if (cvInitSystem(0, NULL))
+        throw std::runtime_error("Failed to initialize Wayland backend");
+
     g_core->destroy_window(name);
 }
 
 CV_IMPL void cvDestroyAllWindows()
 {
+    if (cvInitSystem(0, NULL))
+        throw std::runtime_error("Failed to initialize Wayland backend");
+
     g_core->destroy_all_windows();
 }
 
 CV_IMPL void* cvGetWindowHandle(const char* name)
 {
+    if (cvInitSystem(0, NULL))
+        throw std::runtime_error("Failed to initialize Wayland backend");
+
     return g_core->get_window_handle(name);
 }
 
 CV_IMPL const char* cvGetWindowName(void* window_handle)
 {
+    if (cvInitSystem(0, NULL))
+        throw std::runtime_error("Failed to initialize Wayland backend");
+
     return g_core->get_window_name(window_handle).c_str();
 }
 
@@ -1512,6 +1527,8 @@ CV_IMPL void cvMoveWindow(const char* name, int x, int y)
      * Only a wayland compositor is allowed to do it
      * So this function is not implemented
      */
+    if (cvInitSystem(0, NULL))
+        throw std::runtime_error("Failed to initialize Wayland backend");
 }
 
 CV_IMPL void cvResizeWindow(const char* name, int width, int height)
@@ -1521,6 +1538,8 @@ CV_IMPL void cvResizeWindow(const char* name, int width, int height)
      * Only a wayland compositor is allowed to do it
      * So this function is not implemented
      */
+    if (cvInitSystem(0, NULL))
+        throw std::runtime_error("Failed to initialize Wayland backend");
 }
 
 CV_IMPL int cvCreateTrackbar(const char* name_bar, const char* window_name, int* value, int count, CvTrackbarCallback on_change)
@@ -1533,6 +1552,9 @@ CV_IMPL int cvCreateTrackbar(const char* name_bar, const char* window_name, int*
 
 CV_IMPL int cvCreateTrackbar2(const char* name_bar, const char* window_name, int* val, int count, CvTrackbarCallback2 on_notify, void* userdata)
 {
+    if (cvInitSystem(0, NULL))
+        throw std::runtime_error("Failed to initialize Wayland backend");
+
     auto window = g_core->get_window(window_name);
 
     window->create_trackbar(name_bar, val, count, on_notify, userdata);
@@ -1541,6 +1563,9 @@ CV_IMPL int cvCreateTrackbar2(const char* name_bar, const char* window_name, int
 
 CV_IMPL int cvGetTrackbarPos(const char* name_bar, const char* window_name)
 {
+    if (cvInitSystem(0, NULL))
+        throw std::runtime_error("Failed to initialize Wayland backend");
+
     auto window = g_core->get_window(window_name);
 
     return window->get_track_pos(name_bar);
@@ -1548,6 +1573,9 @@ CV_IMPL int cvGetTrackbarPos(const char* name_bar, const char* window_name)
 
 CV_IMPL void cvSetTrackbarPos(const char* name_bar, const char* window_name, int pos)
 {
+    if (cvInitSystem(0, NULL))
+        throw std::runtime_error("Failed to initialize Wayland backend");
+
     auto window = g_core->get_window(window_name);
 
     window->set_track_pos(name_bar, pos);
@@ -1555,6 +1583,9 @@ CV_IMPL void cvSetTrackbarPos(const char* name_bar, const char* window_name, int
 
 CV_IMPL void cvSetMouseCallback(const char* window_name, CvMouseCallback on_mouse, void* param)
 {
+    if (cvInitSystem(0, NULL))
+        throw std::runtime_error("Failed to initialize Wayland backend");
+
     auto window = g_core->get_window(window_name);
 
     window->set_mouse_callback(on_mouse, param);
@@ -1562,7 +1593,16 @@ CV_IMPL void cvSetMouseCallback(const char* window_name, CvMouseCallback on_mous
 
 CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
 {
-    auto window = g_core->get_window(name);
+    if (cvInitSystem(0, NULL))
+        throw std::runtime_error("Failed to initialize Wayland backend");
+
+    shared_ptr<cv_wl_window> window;
+    try {
+        window = g_core->get_window(name);
+    } catch (std::out_of_range& e) {
+        g_core->create_window(name, cv::WINDOW_NORMAL);
+        window = g_core->get_window(name);
+    }
 
     cv::Mat mat = cv::cvarrToMat(arr, true);
     window->show_image(std::move(mat));
@@ -1571,6 +1611,9 @@ CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
 
 CV_IMPL int cvWaitKey(int delay)
 {
+    if (cvInitSystem(0, NULL))
+        throw std::runtime_error("Failed to initialize Wayland backend");
+
     int key = -1;
 
     namespace ch  = std::chrono;
