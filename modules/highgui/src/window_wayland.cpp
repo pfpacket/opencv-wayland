@@ -393,6 +393,8 @@ private:
 
     bool slider_moved_ = true;
     cv::Mat data_;
+
+    void prepare_to_draw();
 };
 
 class cv_wl_window
@@ -1046,9 +1048,11 @@ int cv_wl_trackbar::get_pos() const
 
 void cv_wl_trackbar::set_pos(int value)
 {
-    slider_.value = value;
-    slider_moved_ = true;
-    window_.lock()->show();
+    if (0 <= value && value < count_) {
+        slider_.value = value;
+        slider_moved_ = true;
+        window_.lock()->show();
+    }
 }
 
 std::pair<int, int> cv_wl_trackbar::get_area()
@@ -1056,21 +1060,24 @@ std::pair<int, int> cv_wl_trackbar::get_area()
     return std::make_pair(width_, height_);
 }
 
+void cv_wl_trackbar::prepare_to_draw()
+{
+    bar_.text_size = cv::getTextSize(
+        (name_ + ": " + std::to_string(count_)).c_str(), bar_.fontface,
+        bar_.fontscale, bar_.font_thickness, nullptr);
+    bar_.text_orig = cv::Point(2, (height_ + bar_.text_size.height) / 2);
+    bar_.left = cv::Point(bar_.text_size.width + 10, height_ / 2);
+    bar_.right = cv::Point(width_ - bar_.margin - 1, height_ / 2);
+
+    int slider_pos_x = ((double)bar_.length() / count_ * slider_.value);
+    slider_.pos = cv::Point(bar_.left.x + slider_pos_x, bar_.left.y);
+}
+
 bool cv_wl_trackbar::set_area(int width, int height)
 {
     if (width_ != width || height_ != height) {
         width_ = width;
         height_ = height;
-
-        bar_.text_size = cv::getTextSize(
-            name_.c_str(), bar_.fontface,
-            bar_.fontscale, bar_.font_thickness, nullptr);
-        bar_.text_orig = cv::Point(2, (height_ + bar_.text_size.height) / 2);
-        bar_.left = cv::Point(bar_.text_size.width + 10, height_ / 2);
-        bar_.right = cv::Point(width_ - bar_.margin - 1, height_ / 2);
-
-        int slider_pos_x = (((double)bar_.length() / count_) * slider_.value);
-        slider_.pos = cv::Point(bar_.left.x + slider_pos_x, bar_.left.y);
     }
     return true;
 }
@@ -1079,16 +1086,23 @@ void cv_wl_trackbar::draw(void *data)
 {
     data_ = cv::Mat(height_, width_, CV_8UC3, CV_RGB(0xde, 0xde, 0xde));
 
-    cv::putText(data_, name_.c_str(), bar_.text_orig, bar_.fontface,
-        bar_.fontscale, CV_RGB(0x00, 0x00, 0x00), bar_.font_thickness);
+    static int i = 0;
+    if (slider_moved_ || i++ < 2) {
+        this->prepare_to_draw();
+        cv::putText(
+            data_,
+            (name_ + ": " + std::to_string(slider_.value)).c_str(),
+            bar_.text_orig, bar_.fontface, bar_.fontscale,
+            CV_RGB(0x00, 0x00, 0x00), bar_.font_thickness);
 
-    cv::line(data_, bar_.left, bar_.right, color_.bg, bar_.thickness + 3, CV_AA);
-    cv::line(data_, bar_.left, bar_.right, color_.fg, bar_.thickness, CV_AA);
-    cv::circle(data_, slider_.pos, slider_.radius, color_.fg, -1, CV_AA);
-    cv::circle(data_, slider_.pos, slider_.radius, color_.bg, 1, CV_AA);
+        cv::line(data_, bar_.left, bar_.right, color_.bg, bar_.thickness + 3, CV_AA);
+        cv::line(data_, bar_.left, bar_.right, color_.fg, bar_.thickness, CV_AA);
+        cv::circle(data_, slider_.pos, slider_.radius, color_.fg, -1, CV_AA);
+        cv::circle(data_, slider_.pos, slider_.radius, color_.bg, 1, CV_AA);
 
-    write_mat_to_xrgb8888(data_, data);
-    slider_moved_ = false;
+        write_mat_to_xrgb8888(data_, data);
+        slider_moved_ = false;
+    }
 }
 
 void cv_wl_trackbar::on_mouse(int event, int x, int y, int flag)
@@ -1098,9 +1112,7 @@ void cv_wl_trackbar::on_mouse(int event, int x, int y, int flag)
         if (!(flag & cv::EVENT_FLAG_LBUTTON))
             break;
     case cv::EVENT_LBUTTONDOWN:
-    case cv::EVENT_LBUTTONUP:
         if (bar_.left.x < x && x < bar_.right.x) {
-            slider_.pos = cv::Point(x, bar_.left.y);
             slider_.value = (double)(x - bar_.left.x) / bar_.length() * count_;
             slider_moved_ = true;
             window_.lock()->show();
