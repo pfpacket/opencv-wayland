@@ -350,7 +350,8 @@ public:
 
     std::string const& name() const;
     int get_pos() const;
-    void set_pos(int value);;
+    void set_pos(int value);
+    void set_max(int count);
     std::pair<int, int> get_area() override;
     bool set_area(int width, int height) override;
     void draw(void *data) override;
@@ -416,6 +417,7 @@ public:
     void create_trackbar(std::string const& name, int *value, int count, CvTrackbarCallback2 on_change, void *userdata);
     int get_track_pos(std::string const&) const;
     void set_track_pos(std::string const&, int);
+    void set_track_max(std::string const&, int);
     void show();
 
     void set_mouse_callback(CvMouseCallback on_mouse, void *param);
@@ -1055,6 +1057,16 @@ void cv_wl_trackbar::set_pos(int value)
     }
 }
 
+void cv_wl_trackbar::set_max(int maxval)
+{
+    count_ = maxval;
+    if (!(0 <= slider_.value && slider_.value < count_)) {
+        slider_.value = maxval - 1;
+        slider_moved_ = true;
+        window_.lock()->show();
+    }
+}
+
 std::pair<int, int> cv_wl_trackbar::get_area()
 {
     return std::make_pair(width_, height_);
@@ -1221,6 +1233,16 @@ void cv_wl_window::set_track_pos(std::string const& bar_name, int value)
         });
     if (it != widgets_.end())
         (*it)->set_pos(value);
+}
+
+void cv_wl_window::set_track_max(std::string const& bar_name, int maxval)
+{
+    auto it = std::find_if(widgets_.begin(), widgets_.end(),
+        [&bar_name](shared_ptr<cv_wl_trackbar> tb) {
+            return tb->name() == bar_name;
+        });
+    if (it != widgets_.end())
+        (*it)->set_max(maxval);
 }
 
 void cv_wl_window::show()
@@ -1591,6 +1613,16 @@ CV_IMPL void cvSetTrackbarPos(const char* name_bar, const char* window_name, int
     auto window = g_core->get_window(window_name);
 
     window->set_track_pos(name_bar, pos);
+}
+
+CV_IMPL void cvSetTrackbarMax(const char* trackbar_name, const char* window_name, int maxval)
+{
+    if (cvInitSystem(0, NULL))
+        throw std::runtime_error("Failed to initialize Wayland backend");
+
+    auto window = g_core->get_window(window_name);
+
+    window->set_track_max(trackbar_name, maxval);
 }
 
 CV_IMPL void cvSetMouseCallback(const char* window_name, CvMouseCallback on_mouse, void* param)
