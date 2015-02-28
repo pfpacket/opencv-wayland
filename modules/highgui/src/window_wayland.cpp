@@ -1050,7 +1050,7 @@ int cv_wl_trackbar::get_pos() const
 
 void cv_wl_trackbar::set_pos(int value)
 {
-    if (0 <= value && value < count_) {
+    if (0 <= value && value <= count_) {
         slider_.value = value;
         slider_moved_ = true;
         window_.lock()->show();
@@ -1060,8 +1060,8 @@ void cv_wl_trackbar::set_pos(int value)
 void cv_wl_trackbar::set_max(int maxval)
 {
     count_ = maxval;
-    if (!(0 <= slider_.value && slider_.value < count_)) {
-        slider_.value = maxval - 1;
+    if (!(0 <= slider_.value && slider_.value <= count_)) {
+        slider_.value = maxval;
         slider_moved_ = true;
         window_.lock()->show();
     }
@@ -1124,7 +1124,7 @@ void cv_wl_trackbar::on_mouse(int event, int x, int y, int flag)
         if (!(flag & cv::EVENT_FLAG_LBUTTON))
             break;
     case cv::EVENT_LBUTTONDOWN:
-        if (bar_.left.x < x && x < bar_.right.x) {
+        if (bar_.left.x <= x && x <= bar_.right.x) {
             slider_.value = (double)(x - bar_.left.x) / bar_.length() * count_;
             slider_moved_ = true;
             window_.lock()->show();
