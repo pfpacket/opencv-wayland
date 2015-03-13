@@ -36,12 +36,6 @@
 
 #define BACKEND_NAME "OpenCV Wayland"
 
-#define DEBUG_PRINT_LOCATION_INFO \
-#ifdef DEBUG \
-    std::cerr << "[DEBUG] " << BACKEND_NAME << ": " << __func__ << ": " \
-    << __FILE__ << ":" << __LINE__ << " passed" << std::endl; \
-#endif
-
 /*                              */
 /*  OpenCV highgui internals    */
 /*                              */
