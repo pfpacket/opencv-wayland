@@ -1,12 +1,6 @@
 /*
  * Wayland Backend
  * TODO:
- *  Double buffering not working:
- *   * when buffer1 being used, where next_frame_ready=0,
- *     cv_wl_window::show() doesn't try to render.
- *     At such moment, ideally, we should render to the buffer2,
- *     and after frame callback is called, which means next_frame_ready becomes true
- *     , then in that callback fnuction we call cv_wl_window::show().
  *  Resizing
  *  Support WINDOW_NORMAL in cv_wl_window and cv_wl_viewer
  */
@@ -440,13 +434,7 @@ struct cv_wl_mouse_callback {
 
 class cv_wl_window {
 public:
-    enum {
-        default_width = 320,
-        default_height = 240
-    };
-
     cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string const& name, int flags);
-    cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string const& name, int width, int height, int flags);
     ~cv_wl_window();
 
     cv::Size get_size() const;
@@ -488,10 +476,7 @@ private:
     };
 
     struct {
-        bool commit_request = false;   /* we need to commit the current surface as soon as possible */
         bool repaint_request = false;  /* we need to redraw as soon as possible (some states are changed) */
-        cv_wl_buffer *buffer = nullptr;
-        cv::Rect damage{0, 0, 0, 0};
     } pending_;
 
     shared_ptr<cv_wl_viewer> viewer_;
@@ -1201,14 +1186,12 @@ void cv_wl_buffer::handle_buffer_release(void *data, struct wl_buffer *buffer)
  * cv_wl_window implementation
  */
 cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string const& name, int flags)
-    : cv_wl_window(display, name, default_width, default_height, flags)
-{
-}
-
-cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string const& name, int width, int height, int flags)
-    : size_{width, height}, name_(name), display_(display), surface_(display->get_surface())
+    : name_(name), display_(display), surface_(display->get_surface())
 {
     shell_surface_ = display->get_shell_surface(surface_);
+    if (!shell_surface_)
+        throw std::runtime_error("Failed to get xdg_surface");
+
     xdg_surface_add_listener(shell_surface_, &shsurf_listener, this);
     xdg_surface_set_title(shell_surface_, name_.c_str());
 
@@ -1299,7 +1282,6 @@ void cv_wl_window::show()
     std::cerr << "[*] DEBUG: buffer0@" << std::hex << &buffers_[0] << ".busy=" << buffers_[0].is_busy()
         << " buffer1@" << &buffers_[1] << ".busy=" << buffers_[1].is_busy()
         << " pending_.repaint_request=" << pending_.repaint_request
-        << " pending_.commit_request=" << pending_.commit_request
         << " next_frame_ready=" << next_frame_ready_
         << " buffer_available=" << (buffer ? true : false)
         << " buffer=" << buffer << std::dec
@@ -1358,13 +1340,7 @@ void cv_wl_window::show()
     calculate_damage(surface_damage, viewer_damage, curr_height);
     viewer_point_ = cv::Point(0, curr_height);
 
-    if (next_frame_ready_) {
-        this->commit_buffer(buffer, surface_damage);
-    } else {
-        pending_.commit_request = true;
-        pending_.buffer = buffer;
-        pending_.damage = std::move(surface_damage);
-    }
+    this->commit_buffer(buffer, surface_damage);
 }
 
 void cv_wl_window::print_debug_info() const
@@ -1373,7 +1349,6 @@ void cv_wl_window::print_debug_info() const
     std::cerr << "[*] DEBUG: buffer0@" << std::hex << &buffers_[0] << ".busy=" << buffers_[0].is_busy()
         << " buffer1@" << &buffers_[1] << ".busy=" << buffers_[1].is_busy()
         << " pending_.repaint_request=" << pending_.repaint_request
-        << " pending_.commit_request=" << pending_.commit_request
         << " next_frame_ready=" << next_frame_ready_
         << " buffer_size=" << size_
         << std::endl;
@@ -1406,15 +1381,7 @@ void cv_wl_window::handle_frame_callback(void *data, struct wl_callback *cb, uin
     if (window->pending_.repaint_request) {
         window->pending_.repaint_request = false;
         window->show();
-    } else if (window->pending_.commit_request) {
-        window->pending_.commit_request = false;
-        window->commit_buffer(window->pending_.buffer, window->pending_.damage);
-        window->pending_.buffer = nullptr;
     }
-
-    window->pending_.repaint_request = false;
-    window->pending_.commit_request = false;
-    window->pending_.buffer = nullptr;
 }
 
 void cv_wl_window::mouse_enter(int x, int y)
