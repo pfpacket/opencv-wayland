@@ -63,9 +63,9 @@ class cv_wl_trackbar;
 class cv_wl_window;
 class cv_wl_core;
 
-using std::shared_ptr;
 using std::weak_ptr;
-extern shared_ptr<cv_wl_core> g_core;
+using std::shared_ptr;
+extern shared_ptr<cv_wl_core> cv_core;
 
 template<typename Container>
 static void clear_container(Container& cont)
@@ -183,7 +183,7 @@ public:
     std::pair<uint32_t, bool> run_once(int timeout);
 
     struct wl_shm *shm();
-    shared_ptr<cv_wl_input> input();
+    weak_ptr<cv_wl_input> input();
     uint32_t formats() const;
     struct wl_surface *get_surface();
     struct xdg_surface *get_shell_surface(struct wl_surface *surface);
@@ -243,7 +243,7 @@ public:
     cv_wl_keyboard(struct wl_keyboard *keyboard);
     ~cv_wl_keyboard();
 
-    std::queue<int> get_queued_keys();
+    std::queue<int> get_key_queue();
 
 private:
     struct {
@@ -275,8 +275,8 @@ public:
     cv_wl_input(struct wl_seat *seat);
     ~cv_wl_input();
 
-    shared_ptr<cv_wl_mouse> mouse();
-    shared_ptr<cv_wl_keyboard> keyboard();
+    weak_ptr<cv_wl_mouse> mouse();
+    weak_ptr<cv_wl_keyboard> keyboard();
 
 private:
     struct wl_seat *seat_;
@@ -341,7 +341,8 @@ public:
 
     virtual void on_mouse(int event, int x, int y, int flag) {}
 
-    virtual void draw(void *data, cv::Size size) = 0;
+    /* Return: The area widget rendered, if not rendered at all, set as width=height=0 */
+    virtual cv::Rect draw(void *data, cv::Size const&, bool force) = 0;
 
 protected:
     cv::Size last_size_{0, 0};
@@ -358,11 +359,13 @@ public:
     int get_preferred_width() const override;
     int get_preferred_height_for_width(int width) const override;
     void on_mouse(int event, int x, int y, int flag) override;
-    void draw(void *data, cv::Size size) override;
+    cv::Rect draw(void *data, cv::Size const&, bool force) override;
 
 private:
     int flags_;
     cv::Mat image_;
+    bool image_changed_ = false;
+
     void *param_ = nullptr;
     CvMouseCallback callback_ = nullptr;
 };
@@ -380,7 +383,7 @@ public:
     int get_preferred_width() const override;
     int get_preferred_height_for_width(int width) const override;
     void on_mouse(int event, int x, int y, int flag) override;
-    void draw(void *data, cv::Size size) override;
+    cv::Rect draw(void *data, cv::Size const& size, bool force) override;
 
 private:
     std::string name_;
@@ -479,9 +482,10 @@ private:
     };
 
     struct {
-        cv_wl_buffer *buffer = nullptr;
         bool commit_request = false;   /* we need to commit the current surface as soon as possible */
         bool repaint_request = false;  /* we need to redraw as soon as possible (some states are changed) */
+        cv_wl_buffer *buffer = nullptr;
+        cv::Rect damage{0, 0, 0, 0};
     } pending_;
 
     shared_ptr<cv_wl_viewer> viewer_;
@@ -492,7 +496,7 @@ private:
     cv_wl_mouse_callback on_mouse_;
 
     cv_wl_buffer* next_buffer();
-    void commit_buffer(cv_wl_buffer *buffer);
+    void commit_buffer(cv_wl_buffer *buffer, cv::Rect const&);
     static void handle_surface_configure(void *, struct xdg_surface *, int32_t, int32_t, struct wl_array *, uint32_t);
     static void handle_surface_close(void *data, struct xdg_surface *xdg_surface);
     static void handle_frame_callback(void *data, struct wl_callback *cb, uint32_t time);
@@ -528,7 +532,6 @@ cv_wl_display::cv_wl_display()
     :   display_{wl_display_connect(nullptr)}
 {
     init();
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
 }
 
 cv_wl_display::cv_wl_display(std::string const& disp)
@@ -536,7 +539,6 @@ cv_wl_display::cv_wl_display(std::string const& disp)
     :   display_{wl_display_connect(disp.c_str())}
 {
     init();
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
 }
 
 cv_wl_display::~cv_wl_display()
@@ -548,7 +550,6 @@ cv_wl_display::~cv_wl_display()
     wl_display_flush(display_);
     input_.reset();
     wl_display_disconnect(display_);
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
 int cv_wl_display::dispatch()
@@ -606,7 +607,7 @@ struct wl_shm *cv_wl_display::shm()
     return shm_;
 }
 
-shared_ptr<cv_wl_input> cv_wl_display::input()
+weak_ptr<cv_wl_input> cv_wl_display::input()
 {
     return input_;
 }
@@ -694,13 +695,11 @@ cv_wl_mouse::cv_wl_mouse(struct wl_pointer *pointer)
     :   pointer_(pointer)
 {
     wl_pointer_add_listener(pointer_, &pointer_listener_, this);
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
 }
 
 cv_wl_mouse::~cv_wl_mouse()
 {
     wl_pointer_destroy(pointer_);
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
 void cv_wl_mouse::handle_pointer_enter(void *data, struct wl_pointer *pointer,
@@ -761,7 +760,6 @@ cv_wl_keyboard::cv_wl_keyboard(struct wl_keyboard *keyboard)
     if (!xkb_.ctx)
         throw std::runtime_error("Failed to create xkb context");
     wl_keyboard_add_listener(keyboard_, &keyboard_listener_, this);
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
 }
 
 cv_wl_keyboard::~cv_wl_keyboard()
@@ -773,10 +771,9 @@ cv_wl_keyboard::~cv_wl_keyboard()
     if (xkb_.ctx)
         xkb_context_unref(xkb_.ctx);
     wl_keyboard_destroy(keyboard_);
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
-std::queue<int> cv_wl_keyboard::get_queued_keys()
+std::queue<int> cv_wl_keyboard::get_key_queue()
 {
     return std::move(key_queue_);
 }
@@ -856,7 +853,6 @@ cv_wl_input::cv_wl_input(struct wl_seat *seat)
     if (!seat_)
         throw std::runtime_error("Invalid seat detected when initializing");
     wl_seat_add_listener(seat_, &seat_listener_, this);
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
 }
 
 cv_wl_input::~cv_wl_input()
@@ -864,17 +860,16 @@ cv_wl_input::~cv_wl_input()
     mouse_.reset();
     keyboard_.reset();
     wl_seat_destroy(seat_);
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
-shared_ptr<cv_wl_mouse> cv_wl_input::mouse()
+weak_ptr<cv_wl_mouse> cv_wl_input::mouse()
 {
     if (!mouse_)
         throw std::runtime_error("seat: mouse not available");
     return mouse_;
 }
 
-shared_ptr<cv_wl_keyboard> cv_wl_input::keyboard()
+weak_ptr<cv_wl_keyboard> cv_wl_input::keyboard()
 {
     if (!keyboard_)
         throw std::runtime_error("seat: keyboard not available");
@@ -918,6 +913,7 @@ void cv_wl_viewer::set_image(cv::Mat const& image)
     } else {
         image_ = image.clone();
     }
+    image_changed_ = true;
 }
 
 void cv_wl_viewer::set_mouse_callback(CvMouseCallback callback, void *param)
@@ -944,18 +940,20 @@ void cv_wl_viewer::on_mouse(int event, int x, int y, int flag)
         callback_(event, x, y, flag, param_);
 }
 
-void cv_wl_viewer::draw(void *data, cv::Size size)
+cv::Rect cv_wl_viewer::draw(void *data, cv::Size const& size, bool force)
 {
-    /* Now image set */
-    if (size.area() == 0)
-        return;
+    if ((!force && !image_changed_) || image_.size().area() == 0 || size.area() == 0)
+        return cv::Rect(0, 0, 0, 0);
 
     if (flags_ & cv::WINDOW_AUTOSIZE) {
-        assert(image_.cols == size.width && image_.rows == size.height);
+        assert(image_.size() == size);
         write_mat_to_xrgb8888(image_, data);
     }
 
     last_size_ = size;
+    image_changed_ = false;
+
+    return cv::Rect(cv::Point(0, 0), size);
 }
 
 
@@ -1022,25 +1020,31 @@ void cv_wl_trackbar::prepare_to_draw()
     slider_.pos = cv::Point(bar_.left.x + slider_pos_x, bar_.left.y);
 }
 
-void cv_wl_trackbar::draw(void *data, cv::Size size)
+cv::Rect cv_wl_trackbar::draw(void *data, cv::Size const& size, bool force)
 {
+    auto damage = cv::Rect(0, 0, 0, 0);
     size_ = last_size_ = size;
     data_ = cv::Mat(size_, CV_8UC3, CV_RGB(0xde, 0xde, 0xde));
 
-    this->prepare_to_draw();
-    cv::putText(
-        data_,
-        (name_ + ": " + std::to_string(slider_.value)).c_str(),
-        bar_.text_orig, bar_.fontface, bar_.fontscale,
-        CV_RGB(0x00, 0x00, 0x00), bar_.font_thickness);
+    if (slider_moved_ || force) {
+        this->prepare_to_draw();
+        cv::putText(
+            data_,
+            (name_ + ": " + std::to_string(slider_.value)).c_str(),
+            bar_.text_orig, bar_.fontface, bar_.fontscale,
+            CV_RGB(0x00, 0x00, 0x00), bar_.font_thickness);
 
-    cv::line(data_, bar_.left, bar_.right, color_.bg, bar_.thickness + 3, CV_AA);
-    cv::line(data_, bar_.left, bar_.right, color_.fg, bar_.thickness, CV_AA);
-    cv::circle(data_, slider_.pos, slider_.radius, color_.fg, -1, CV_AA);
-    cv::circle(data_, slider_.pos, slider_.radius, color_.bg, 1, CV_AA);
+        cv::line(data_, bar_.left, bar_.right, color_.bg, bar_.thickness + 3, CV_AA);
+        cv::line(data_, bar_.left, bar_.right, color_.fg, bar_.thickness, CV_AA);
+        cv::circle(data_, slider_.pos, slider_.radius, color_.fg, -1, CV_AA);
+        cv::circle(data_, slider_.pos, slider_.radius, color_.bg, 1, CV_AA);
 
-    write_mat_to_xrgb8888(data_, data);
-    slider_moved_ = false;
+        write_mat_to_xrgb8888(data_, data);
+        damage = cv::Rect(cv::Point(0, 0), size);
+        slider_moved_ = false;
+    }
+
+    return damage;
 }
 
 void cv_wl_trackbar::on_mouse(int event, int x, int y, int flag)
@@ -1070,13 +1074,11 @@ int cv_wl_buffer::number_ = 0;
 
 cv_wl_buffer::cv_wl_buffer()
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
 }
 
 cv_wl_buffer::~cv_wl_buffer()
 {
     this->destroy();
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
 void cv_wl_buffer::destroy()
@@ -1183,8 +1185,6 @@ cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string
 
     viewer_ = std::make_shared<cv_wl_viewer>(this, flags);
     viewer_point_ = cv::Point(0, 0);
-
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
 }
 
 cv_wl_window::~cv_wl_window()
@@ -1193,7 +1193,6 @@ cv_wl_window::~cv_wl_window()
         wl_callback_destroy(frame_callback_);
     xdg_surface_destroy(shell_surface_);
     wl_surface_destroy(surface_);
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
 cv::Size cv_wl_window::get_size() const
@@ -1216,9 +1215,6 @@ cv_wl_buffer* cv_wl_window::next_buffer()
         buffer = &buffers_[1];
     else
         return nullptr;
-
-    if (!buffer->is_allocated() || buffer->size() != size_)
-        buffer->create_shm(display_->shm(), size_, WL_SHM_FORMAT_XRGB8888);
 
     return buffer;
 }
@@ -1255,8 +1251,34 @@ weak_ptr<cv_wl_trackbar> cv_wl_window::get_trackbar(std::string const& trackbar_
         : std::static_pointer_cast<cv_wl_trackbar>(*it);
 }
 
+static void calculate_damage(cv::Rect& surface_damage, cv::Rect const& widget_damage, int curr_height = 0)
+{
+    if (widget_damage.area() != 0) {
+        surface_damage.x = std::min(surface_damage.x, widget_damage.x);
+        surface_damage.y = std::min(surface_damage.y, curr_height + widget_damage.y);
+        surface_damage.width = std::max(surface_damage.x + surface_damage.width, widget_damage.x + widget_damage.width);
+        surface_damage.height = std::max(surface_damage.height, curr_height + widget_damage.y + widget_damage.height - surface_damage.y);
+    }
+}
+
 void cv_wl_window::show()
 {
+    auto *buffer = this->next_buffer();
+#if !defined(NDEBUG)
+    std::cerr << "[*] DEBUG: buffer0@" << std::hex << &buffers_[0] << ".busy=" << buffers_[0].is_busy()
+        << " buffer1@" << &buffers_[1] << ".busy=" << buffers_[1].is_busy()
+        << " pending_.repaint_request=" << pending_.repaint_request
+        << " pending_.commit_request=" << pending_.commit_request
+        << " next_frame_ready=" << next_frame_ready_
+        << " buffer_available=" << (buffer ? true : false)
+        << " buffer=" << buffer << std::dec
+        << std::endl;
+#endif
+    if (!next_frame_ready_ || !buffer) {
+        pending_.repaint_request = true;
+        return;
+    }
+
     int total_height = 0;
     int max_width = viewer_->get_preferred_width();
     std::vector<int> height_list;
@@ -1275,48 +1297,48 @@ void cv_wl_window::show()
     height_list.push_back(viewer_->get_preferred_height_for_width(max_width));
     total_height += height_list.back();
 
-    /* The actual size of a window */
+    /* The actual size of a surface */
     size_ = cv::Size(max_width, total_height);
 
-    auto *buffer = this->next_buffer();
-    std::cerr << "[*] DEBUG: buffer0@" << std::hex << &buffers_[0] << ".busy=" << buffers_[0].is_busy()
-        << " buffer1@" << &buffers_[1] << ".busy=" << buffers_[1].is_busy()
-        << " pending_.repaint_request=" << pending_.repaint_request
-        << " pending_.commit_request=" << pending_.commit_request
-        << " next_frame_ready=" << next_frame_ready_
-        << " buffer_available=" << (buffer ? true : false)
-        << " buffer=" << buffer << std::dec
-        << " buffer_size=" << size_
-        << std::endl;
-    if (!buffer || !next_frame_ready_) {
-        pending_.repaint_request = true;
-        return;
-    }
+    bool buffer_size_changed = (buffer->size() != size_);
+    if (!buffer->is_allocated() || buffer_size_changed)
+        buffer->create_shm(display_->shm(), size_, WL_SHM_FORMAT_XRGB8888);
 
     int curr_height = 0;
+    auto surface_damage = cv::Rect(cv::Point(size_), cv::Size(0, 0));
     for (size_t i = 0; i < widgets_.size(); ++i) {
-        widgets_[i]->draw(
+        auto widget_damage = widgets_[i]->draw(
             buffer->data() + (max_width * curr_height * 4),
-            cv::Size(max_width, height_list[i])
+            cv::Size(max_width, height_list[i]),
+            buffer_size_changed
         );
+
+        calculate_damage(surface_damage, widget_damage, curr_height);
 
         widgets_points_[i] = cv::Point(0, curr_height);
         curr_height += height_list[i];
     }
-    viewer_->draw(buffer->data() + (max_width * curr_height * 4), cv::Size(max_width, height_list.back()));
+
+    auto viewer_damage = viewer_->draw(
+        buffer->data() + (max_width * curr_height * 4),
+        cv::Size(max_width, height_list.back()),
+        buffer_size_changed
+    );
+    calculate_damage(surface_damage, viewer_damage, curr_height);
     viewer_point_ = cv::Point(0, curr_height);
 
     if (next_frame_ready_) {
-        this->commit_buffer(buffer);
+        this->commit_buffer(buffer, surface_damage);
     } else {
         pending_.commit_request = true;
         pending_.buffer = buffer;
+        pending_.damage = std::move(surface_damage);
     }
-
 }
 
 void cv_wl_window::print_debug_info() const
 {
+#if !defined(NDEBUG)
     std::cerr << "[*] DEBUG: buffer0@" << std::hex << &buffers_[0] << ".busy=" << buffers_[0].is_busy()
         << " buffer1@" << &buffers_[1] << ".busy=" << buffers_[1].is_busy()
         << " pending_.repaint_request=" << pending_.repaint_request
@@ -1324,15 +1346,16 @@ void cv_wl_window::print_debug_info() const
         << " next_frame_ready=" << next_frame_ready_
         << " buffer_size=" << size_
         << std::endl;
+#endif
 }
 
-void cv_wl_window::commit_buffer(cv_wl_buffer *buffer)
+void cv_wl_window::commit_buffer(cv_wl_buffer *buffer, cv::Rect const& damage)
 {
     if (!buffer)
         return;
 
     buffer->attach_to_surface(surface_, 0, 0);
-    wl_surface_damage(surface_, 0, 0, size_.width, size_.height);
+    wl_surface_damage(surface_, damage.x, damage.y, damage.width, damage.height);
 
     if (frame_callback_)
         wl_callback_destroy(frame_callback_);
@@ -1354,7 +1377,7 @@ void cv_wl_window::handle_frame_callback(void *data, struct wl_callback *cb, uin
         window->show();
     } else if (window->pending_.commit_request) {
         window->pending_.commit_request = false;
-        window->commit_buffer(window->pending_.buffer);
+        window->commit_buffer(window->pending_.buffer, window->pending_.damage);
         window->pending_.buffer = nullptr;
     }
 
@@ -1381,12 +1404,12 @@ void cv_wl_window::mouse_enter(int x, int y)
 
 void cv_wl_window::mouse_leave()
 {
-    for (size_t i = 0; i < widgets_.size(); ++i) {
-        auto size = widgets_[i]->get_last_size();
-        auto&& p = widgets_points_[i];
-        if (p.y <= on_mouse_.last_y && on_mouse_.last_y <= p.y + size.height)
-            widgets_[i]->on_mouse(0, on_mouse_.last_x, on_mouse_.last_y - p.y, 0);
-    }
+    //for (size_t i = 0; i < widgets_.size(); ++i) {
+    //    auto size = widgets_[i]->get_last_size();
+    //    auto&& p = widgets_points_[i];
+    //    if (p.y <= on_mouse_.last_y && on_mouse_.last_y <= p.y + size.height)
+    //        widgets_[i]->on_mouse(0, on_mouse_.last_x, on_mouse_.last_y - p.y, 0);
+    //}
 }
 
 void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
@@ -1474,14 +1497,12 @@ void cv_wl_window::handle_surface_close(void *data, struct xdg_surface *surface)
  */
 cv_wl_core::cv_wl_core()
 {
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": ctor called" << std::endl;
 }
 
 cv_wl_core::~cv_wl_core()
 {
     this->destroy_all_windows();
     display_.reset();
-    std::cerr << BACKEND_NAME << ": " << __func__ << ": dtor called" << std::endl;
 }
 
 void cv_wl_core::init()
@@ -1544,16 +1565,16 @@ void cv_wl_core::destroy_all_windows()
 /*                              */
 
 /* Global wayland core object */
-shared_ptr<cv_wl_core> g_core;
+shared_ptr<cv_wl_core> cv_core;
 
 CV_IMPL int cvInitSystem(int argc, char **argv)
 {
-    if (!g_core) try {
-        g_core = std::make_shared<cv_wl_core>();
-        if (!g_core)
+    if (!cv_core) try {
+        cv_core = std::make_shared<cv_wl_core>();
+        if (!cv_core)
             throw std::runtime_error("Could not allocate memory for display");
 
-        g_core->init();
+        cv_core->init();
     } catch (std::exception& e) {
         throw std::runtime_error(std::string("Wayland backend: ") + e.what());
     } catch (...) {
@@ -1576,7 +1597,7 @@ CV_IMPL int cvNamedWindow(const char *name, int flags)
     if (cvInitSystem(1, (char **)&name))
         throw std::runtime_error("Failed to initialize Wayland backend");
 
-    return g_core->create_window(name, flags);
+    return cv_core->create_window(name, flags);
 }
 
 CV_IMPL void cvDestroyWindow(const char* name)
@@ -1584,7 +1605,7 @@ CV_IMPL void cvDestroyWindow(const char* name)
     if (cvInitSystem(0, NULL))
         throw std::runtime_error("Failed to initialize Wayland backend");
 
-    g_core->destroy_window(name);
+    cv_core->destroy_window(name);
 }
 
 CV_IMPL void cvDestroyAllWindows()
@@ -1592,7 +1613,7 @@ CV_IMPL void cvDestroyAllWindows()
     if (cvInitSystem(0, NULL))
         throw std::runtime_error("Failed to initialize Wayland backend");
 
-    g_core->destroy_all_windows();
+    cv_core->destroy_all_windows();
 }
 
 CV_IMPL void* cvGetWindowHandle(const char* name)
@@ -1600,7 +1621,7 @@ CV_IMPL void* cvGetWindowHandle(const char* name)
     if (cvInitSystem(0, NULL))
         throw std::runtime_error("Failed to initialize Wayland backend");
 
-    return g_core->get_window_handle(name);
+    return cv_core->get_window_handle(name);
 }
 
 CV_IMPL const char* cvGetWindowName(void* window_handle)
@@ -1608,7 +1629,7 @@ CV_IMPL const char* cvGetWindowName(void* window_handle)
     if (cvInitSystem(0, NULL))
         throw std::runtime_error("Failed to initialize Wayland backend");
 
-    return g_core->get_window_name(window_handle).c_str();
+    return cv_core->get_window_name(window_handle).c_str();
 }
 
 CV_IMPL void cvMoveWindow(const char* name, int x, int y)
@@ -1635,7 +1656,7 @@ CV_IMPL void cvResizeWindow(const char* name, int width, int height)
 
 CV_IMPL int cvCreateTrackbar(const char* name_bar, const char* window_name, int* value, int count, CvTrackbarCallback on_change)
 {
-    //auto window = g_core->get_window(window_name);
+    //auto window = cv_core->get_window(window_name);
 
     //window->create_trackbar(name_bar, value, count, on_change, nullptr);
     return 0;
@@ -1646,7 +1667,7 @@ CV_IMPL int cvCreateTrackbar2(const char* trackbar_name, const char* window_name
     if (cvInitSystem(0, NULL))
         throw std::runtime_error("Failed to initialize Wayland backend");
 
-    auto window = g_core->get_window(window_name);
+    auto window = cv_core->get_window(window_name);
 
     window->create_trackbar(trackbar_name, val, count, on_notify, userdata);
     return 0;
@@ -1657,7 +1678,7 @@ CV_IMPL int cvGetTrackbarPos(const char* trackbar_name, const char* window_name)
     if (cvInitSystem(0, NULL))
         throw std::runtime_error("Failed to initialize Wayland backend");
 
-    auto window = g_core->get_window(window_name);
+    auto window = cv_core->get_window(window_name);
 
     auto trackbar_ptr = window->get_trackbar(trackbar_name);
     if (auto trackbar = trackbar_ptr.lock())
@@ -1671,7 +1692,7 @@ CV_IMPL void cvSetTrackbarPos(const char* trackbar_name, const char* window_name
     if (cvInitSystem(0, NULL))
         throw std::runtime_error("Failed to initialize Wayland backend");
 
-    auto window = g_core->get_window(window_name);
+    auto window = cv_core->get_window(window_name);
 
     auto trackbar_ptr = window->get_trackbar(trackbar_name);
     if (auto trackbar = trackbar_ptr.lock())
@@ -1683,7 +1704,7 @@ CV_IMPL void cvSetTrackbarMax(const char* trackbar_name, const char* window_name
     if (cvInitSystem(0, NULL))
         throw std::runtime_error("Failed to initialize Wayland backend");
 
-    auto window = g_core->get_window(window_name);
+    auto window = cv_core->get_window(window_name);
 
     auto trackbar_ptr = window->get_trackbar(trackbar_name);
     if (auto trackbar = trackbar_ptr.lock())
@@ -1695,7 +1716,7 @@ CV_IMPL void cvSetMouseCallback(const char* window_name, CvMouseCallback on_mous
     if (cvInitSystem(0, NULL))
         throw std::runtime_error("Failed to initialize Wayland backend");
 
-    auto window = g_core->get_window(window_name);
+    auto window = cv_core->get_window(window_name);
 
     window->set_mouse_callback(on_mouse, param);
 }
@@ -1707,10 +1728,10 @@ CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
 
     shared_ptr<cv_wl_window> window;
     try {
-        window = g_core->get_window(name);
+        window = cv_core->get_window(name);
     } catch (std::out_of_range& e) {
-        g_core->create_window(name, cv::WINDOW_NORMAL);
-        window = g_core->get_window(name);
+        cv_core->create_window(name, cv::WINDOW_AUTOSIZE);
+        window = cv_core->get_window(name);
     }
 
     cv::Mat mat = cv::cvarrToMat(arr, true);
@@ -1732,12 +1753,13 @@ CV_IMPL int cvWaitKey(int delay)
         auto start = ch::steady_clock::now();
 
         std::pair<uint32_t, bool> events =
-            g_core->display()->run_once(
+            cv_core->display()->run_once(
                 limit.count() > 0 ? limit.count() : -1);
 
         if (events.first & EPOLLIN) {
             auto&& key_queue =
-                g_core->display()->input()->keyboard()->get_queued_keys();
+                cv_core->display()->input().lock()
+                    ->keyboard().lock()->get_key_queue();
             if (!key_queue.empty()) {
                 key = key_queue.back();
                 break;
