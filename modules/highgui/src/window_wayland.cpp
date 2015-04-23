@@ -1087,8 +1087,12 @@ void cv_wl_buffer::destroy()
         wl_buffer_destroy(buffer_);
         buffer_ = nullptr;
     }
-    if (shm_data_)
+
+    if (shm_data_ && shm_data_ != MAP_FAILED) {
+        munmap(shm_data_, size_.area() * 4);
         shm_data_ = nullptr;
+    }
+
     size_.width = size_.height = 0;
     shm_unlink(shm_path_.c_str());
 }
@@ -1127,9 +1131,9 @@ void cv_wl_buffer::create_shm(struct wl_shm *shm, cv::Size size, uint32_t format
     int buffer_size = stride * size_.height;
 
     shm_path_ = "/opencv_shm-" + std::to_string(number_++);
-    int fd = shm_open(shm_path_.c_str(), O_RDWR | O_CREAT, 0700);
+    int fd = shm_open(shm_path_.c_str(), O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
     if (fd < 0)
-        throw_system_error("creating a shared memory failed", errno);
+        throw_system_error("failed to create a shared memory", errno);
 
     if (ftruncate(fd, buffer_size) < 0) {
         int errno_ = errno;
@@ -1645,11 +1649,6 @@ CV_IMPL void cvMoveWindow(const char* name, int x, int y)
 
 CV_IMPL void cvResizeWindow(const char* name, int width, int height)
 {
-    /*
-     * We cannot resize window surfaces in Wayland
-     * Only a wayland compositor is allowed to do it
-     * So this function is not implemented
-     */
     if (cvInitSystem(0, NULL))
         throw std::runtime_error("Failed to initialize Wayland backend");
 }
