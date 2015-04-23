@@ -1408,12 +1408,6 @@ void cv_wl_window::mouse_enter(int x, int y)
 
 void cv_wl_window::mouse_leave()
 {
-    //for (size_t i = 0; i < widgets_.size(); ++i) {
-    //    auto size = widgets_[i]->get_last_size();
-    //    auto&& p = widgets_points_[i];
-    //    if (p.y <= on_mouse_.last_y && on_mouse_.last_y <= p.y + size.height)
-    //        widgets_[i]->on_mouse(0, on_mouse_.last_x, on_mouse_.last_y - p.y, 0);
-    //}
 }
 
 void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
