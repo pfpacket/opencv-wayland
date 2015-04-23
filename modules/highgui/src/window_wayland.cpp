@@ -58,6 +58,7 @@ class cv_wl_core;
 
 using std::weak_ptr;
 using std::shared_ptr;
+using namespace cv::Error;
 namespace ch = std::chrono;
 
 extern shared_ptr<cv_wl_core> cv_core;
@@ -775,22 +776,21 @@ void cv_wl_keyboard::handle_kb_keymap(void *data, struct wl_keyboard *kb, uint32
 
     try {
         if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1)
-            throw std::runtime_error("XKB_V1 keymap format unavailable");
+            CV_Error(StsInternal, "XKB_V1 keymap format unavailable");
 
         char *map_str = (char *)mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
         if (map_str == MAP_FAILED)
-            throw std::runtime_error("Failed to mmap keymap");
+            CV_Error(StsInternal, "Failed to mmap keymap");
 
         keyboard->xkb_.keymap = xkb_keymap_new_from_string(
             keyboard->xkb_.ctx, map_str, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
         munmap(map_str, size);
         if (!keyboard->xkb_.keymap)
-            throw std::runtime_error("Failed to compile keymap");
-        close(fd);
+            CV_Error(StsInternal, "Failed to compile keymap");
 
         keyboard->xkb_.state = xkb_state_new(keyboard->xkb_.keymap);
         if (!keyboard->xkb_.state)
-            throw std::runtime_error("failed to create XKB state");
+            CV_Error(StsNoMem, "Failed to create XKB state");
 
         keyboard->xkb_.control_mask =
             1 << xkb_keymap_mod_get_index(keyboard->xkb_.keymap, "Control");
@@ -799,9 +799,12 @@ void cv_wl_keyboard::handle_kb_keymap(void *data, struct wl_keyboard *kb, uint32
         keyboard->xkb_.shift_mask =
             1 << xkb_keymap_mod_get_index(keyboard->xkb_.keymap, "Shift");
     } catch (std::exception& e) {
-        std::cerr << BACKEND_NAME << ": " << __func__ << ": " << e.what() << std::endl;
-        close(fd);
+        if (keyboard->xkb_.keymap)
+            xkb_keymap_unref(keyboard->xkb_.keymap);
+        std::cerr << "OpenCV Error: " << e.what() << std::endl;
     }
+
+    close(fd);
 }
 
 void cv_wl_keyboard::handle_kb_enter(void *data, struct wl_keyboard *keyboard, uint32_t serial, struct wl_surface *surface, struct wl_array *keys)
@@ -1560,110 +1563,117 @@ void cv_wl_core::destroy_all_windows()
 shared_ptr<cv_wl_core> cv_core;
 
 CV_IMPL int cvInitSystem(int argc, char **argv)
-{
-    if (!cv_core) try {
+try {
+    if (!cv_core) {
         cv_core = std::make_shared<cv_wl_core>();
         if (!cv_core)
-            throw std::runtime_error("Could not allocate memory for display");
+            CV_ErrorNoReturn(StsNoMem, "Couldn't allocate enough memory");
 
         cv_core->init();
-    } catch (std::exception& e) {
-        throw std::runtime_error(std::string("Wayland backend: ") + e.what());
-    } catch (...) {
-        throw std::runtime_error("Wayland backend: unknown error occurred");
     }
 
     return 0;
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL int cvStartWindowThread()
-{
-    if (cvInitSystem(0, NULL))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+try {
+    cvInitSystem(0, NULL);
 
     return 0;
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL int cvNamedWindow(const char *name, int flags)
-{
-    if (cvInitSystem(1, (char **)&name))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+try {
+    cvInitSystem(1, (char **)&name);
 
     return cv_core->create_window(name, flags);
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvDestroyWindow(const char* name)
-{
-    if (cvInitSystem(0, NULL))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+try {
+    cvInitSystem(0, NULL);
 
     cv_core->destroy_window(name);
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvDestroyAllWindows()
-{
-    if (cvInitSystem(0, NULL))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+try {
+    cvInitSystem(0, NULL);
 
     cv_core->destroy_all_windows();
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void* cvGetWindowHandle(const char* name)
-{
-    if (cvInitSystem(0, NULL))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+try {
+    cvInitSystem(0, NULL);
 
     return cv_core->get_window_handle(name);
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL const char* cvGetWindowName(void* window_handle)
-{
-    if (cvInitSystem(0, NULL))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+try {
+    cvInitSystem(0, NULL);
 
     return cv_core->get_window_name(window_handle).c_str();
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvMoveWindow(const char* name, int x, int y)
-{
+try {
     /*
-     * We cannot move window surfaces in Wayland
+     * We cannot move window surfaces not with the user actions in Wayland
      * Only a wayland compositor is allowed to do it
      * So this function is not implemented
      */
-    if (cvInitSystem(0, NULL))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvResizeWindow(const char* name, int width, int height)
-{
-    if (cvInitSystem(0, NULL))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+try {
+    cvInitSystem(0, NULL);
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL int cvCreateTrackbar(const char* name_bar, const char* window_name, int* value, int count, CvTrackbarCallback on_change)
-{
+try {
     //auto window = cv_core->get_window(window_name);
 
     //window->create_trackbar(name_bar, value, count, on_change, nullptr);
     return 0;
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL int cvCreateTrackbar2(const char* trackbar_name, const char* window_name, int* val, int count, CvTrackbarCallback2 on_notify, void* userdata)
-{
-    if (cvInitSystem(0, NULL))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+try {
+    cvInitSystem(0, NULL);
 
     auto window = cv_core->get_window(window_name);
-
     window->create_trackbar(trackbar_name, val, count, on_notify, userdata);
+
     return 0;
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL int cvGetTrackbarPos(const char* trackbar_name, const char* window_name)
-{
-    if (cvInitSystem(0, NULL))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+try {
+    cvInitSystem(0, NULL);
 
     auto window = cv_core->get_window(window_name);
 
@@ -1672,46 +1682,50 @@ CV_IMPL int cvGetTrackbarPos(const char* trackbar_name, const char* window_name)
         return trackbar->get_pos();
 
     return -1;
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvSetTrackbarPos(const char* trackbar_name, const char* window_name, int pos)
-{
-    if (cvInitSystem(0, NULL))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+try {
+    cvInitSystem(0, NULL);
 
     auto window = cv_core->get_window(window_name);
 
     auto trackbar_ptr = window->get_trackbar(trackbar_name);
     if (auto trackbar = trackbar_ptr.lock())
         trackbar->set_pos(pos);
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvSetTrackbarMax(const char* trackbar_name, const char* window_name, int maxval)
-{
-    if (cvInitSystem(0, NULL))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+try {
+    cvInitSystem(0, NULL);
 
     auto window = cv_core->get_window(window_name);
 
     auto trackbar_ptr = window->get_trackbar(trackbar_name);
     if (auto trackbar = trackbar_ptr.lock())
         trackbar->set_max(maxval);
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvSetMouseCallback(const char* window_name, CvMouseCallback on_mouse, void* param)
-{
-    if (cvInitSystem(0, NULL))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+try {
+    cvInitSystem(0, NULL);
 
     auto window = cv_core->get_window(window_name);
 
     window->set_mouse_callback(on_mouse, param);
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
-{
-    if (cvInitSystem(0, NULL))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+try {
+    cvInitSystem(0, NULL);
 
     shared_ptr<cv_wl_window> window;
     try {
@@ -1724,12 +1738,13 @@ CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
     cv::Mat mat = cv::cvarrToMat(arr, true);
     window->show_image(mat);
     window->show();
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL int cvWaitKey(int delay)
-{
-    if (cvInitSystem(0, NULL))
-        throw std::runtime_error("Failed to initialize Wayland backend");
+try {
+    cvInitSystem(0, NULL);
 
     int key = -1;
     auto limit = ch::milliseconds(delay);
@@ -1760,6 +1775,8 @@ CV_IMPL int cvWaitKey(int delay)
     }
 
     return key;
+} catch (std::exception& e) {
+    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 #ifdef HAVE_OPENGL
