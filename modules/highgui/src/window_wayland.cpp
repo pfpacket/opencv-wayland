@@ -65,6 +65,8 @@ class cv_wl_core;
 
 using std::weak_ptr;
 using std::shared_ptr;
+namespace ch = std::chrono;
+
 extern shared_ptr<cv_wl_core> cv_core;
 
 template<typename Container>
@@ -351,6 +353,10 @@ protected:
 
 class cv_wl_viewer : public cv_wl_widget {
 public:
+    enum {
+        MOUSE_CALLBACK_MIN_INTERVAL_MILLISEC = 20
+    };
+
     cv_wl_viewer(cv_wl_window *, int flags);
 
     void set_image(cv::Mat const& img);
@@ -936,8 +942,24 @@ int cv_wl_viewer::get_preferred_height_for_width(int width) const
 
 void cv_wl_viewer::on_mouse(int event, int x, int y, int flag)
 {
-    if (callback_)
-        callback_(event, x, y, flag, param_);
+    // Make sure the first mouse event is delivered to clients
+    static int last_event = ~event, last_flag = ~flag;
+    static auto last_event_time = ch::steady_clock::now();
+
+    if (callback_) {
+        auto now = ch::steady_clock::now();
+        auto elapsed = ch::duration_cast<ch::milliseconds>(now - last_event_time);
+
+        /* Inhibit the too frequent mouse callback due to the heavy load */
+        if (event != last_event || flag != last_flag ||
+            elapsed.count() >= MOUSE_CALLBACK_MIN_INTERVAL_MILLISEC) {
+            last_event = event;
+            last_flag = flag;
+            last_event_time = now;
+
+            callback_(event, x, y, flag, param_);
+        }
+    }
 }
 
 cv::Rect cv_wl_viewer::draw(void *data, cv::Size const& size, bool force)
@@ -1738,8 +1760,6 @@ CV_IMPL int cvWaitKey(int delay)
         throw std::runtime_error("Failed to initialize Wayland backend");
 
     int key = -1;
-
-    namespace ch  = std::chrono;
     auto limit = ch::milliseconds(delay);
 
     while (true) {
