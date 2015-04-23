@@ -7,9 +7,8 @@
  *     At such moment, ideally, we should render to the buffer2,
  *     and after frame callback is called, which means next_frame_ready becomes true
  *     , then in that callback fnuction we call cv_wl_window::show().
- *  Resizing:
+ *  Resizing
  *  Support WINDOW_NORMAL in cv_wl_window and cv_wl_viewer
- *  Fix bug the slider of cv_wl_trackbar doesn't move to the maximum value
  */
 
 #include "precomp.hpp"
@@ -1079,7 +1078,7 @@ void cv_wl_trackbar::on_mouse(int event, int x, int y, int flag)
         if (!(flag & cv::EVENT_FLAG_LBUTTON))
             break;
     case cv::EVENT_LBUTTONUP:
-        if (slider_.drag && bar_.left.x < x && x < bar_.right.x) {
+        if (slider_.drag && bar_.left.x <= x && x <= bar_.right.x) {
             slider_.value = (double)(x - bar_.left.x) / bar_.length() * count_;
             slider_moved_ = true;
             window_->show();
