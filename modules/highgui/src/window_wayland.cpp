@@ -276,6 +276,7 @@ public:
     cv_wl_input(struct wl_seat *seat);
     ~cv_wl_input();
 
+    struct wl_seat *seat() const { return seat_; }
     weak_ptr<cv_wl_mouse> mouse();
     weak_ptr<cv_wl_keyboard> keyboard();
 
@@ -353,7 +354,7 @@ protected:
 class cv_wl_viewer : public cv_wl_widget {
 public:
     enum {
-        MOUSE_CALLBACK_MIN_INTERVAL_MILLISEC = 20
+        MOUSE_CALLBACK_MIN_INTERVAL_MILLISEC = 15
     };
 
     cv_wl_viewer(cv_wl_window *, int flags);
@@ -1044,10 +1045,15 @@ void cv_wl_trackbar::prepare_to_draw()
 cv::Rect cv_wl_trackbar::draw(void *data, cv::Size const& size, bool force)
 {
     auto damage = cv::Rect(0, 0, 0, 0);
-    size_ = last_size_ = size;
-    data_ = cv::Mat(size_, CV_8UC3, CV_RGB(0xde, 0xde, 0xde));
 
     if (slider_moved_ || force) {
+        size_ = last_size_ = size;
+
+        if (size_ == data_.size())
+            data_ = CV_RGB(0xde, 0xde, 0xde);
+        else
+            data_ = cv::Mat(size_, CV_8UC3, CV_RGB(0xde, 0xde, 0xde));
+
         this->prepare_to_draw();
         cv::putText(
             data_,
