@@ -3,6 +3,7 @@
  * TODO:
  *  Resizing
  *  Support WINDOW_NORMAL in cv_wl_window and cv_wl_viewer
+ *  Support Cursor theme
  */
 
 #include "precomp.hpp"
@@ -1047,7 +1048,7 @@ cv::Rect cv_wl_trackbar::draw(void *data, cv::Size const& size, bool force)
             data_,
             (name_ + ": " + std::to_string(slider_.value)).c_str(),
             bar_.text_orig, bar_.fontface, bar_.fontscale,
-            CV_RGB(0x00, 0x00, 0x00), bar_.font_thickness);
+            CV_RGB(0x00, 0x00, 0x00), bar_.font_thickness, CV_AA);
 
         cv::line(data_, bar_.left, bar_.right, color_.bg, bar_.thickness + 3, CV_AA);
         cv::line(data_, bar_.left, bar_.right, color_.fg, bar_.thickness, CV_AA);
