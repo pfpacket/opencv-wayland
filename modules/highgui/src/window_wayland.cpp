@@ -1274,7 +1274,7 @@ static void calculate_damage(cv::Rect& surface_damage, cv::Rect const& widget_da
     if (widget_damage.area() != 0) {
         surface_damage.x = std::min(surface_damage.x, widget_damage.x);
         surface_damage.y = std::min(surface_damage.y, curr_height + widget_damage.y);
-        surface_damage.width = std::max(surface_damage.x + surface_damage.width, widget_damage.x + widget_damage.width);
+        surface_damage.width = std::max(surface_damage.width, widget_damage.x + widget_damage.width - surface_damage.x);
         surface_damage.height = std::max(surface_damage.height, curr_height + widget_damage.y + widget_damage.height - surface_damage.y);
     }
 }
