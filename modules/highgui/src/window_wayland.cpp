@@ -47,10 +47,12 @@
 /*  OpenCV highgui internals    */
 /*                              */
 class cv_wl_display;
-class cv_wl_input;
 class cv_wl_mouse;
 class cv_wl_keyboard;
+class cv_wl_input;
 class cv_wl_buffer;
+class cv_wl_cursor;
+class cv_wl_cursor_theme;
 class cv_wl_widget;
 class cv_wl_viewer;
 class cv_wl_trackbar;
@@ -219,6 +221,11 @@ public:
     cv_wl_mouse(struct wl_pointer *pointer);
     ~cv_wl_mouse();
 
+    void set_cursor(uint32_t serial, struct wl_surface *surface, int32_t hotspot_x, int32_t hotspot_y)
+    {
+        wl_pointer_set_cursor(pointer_, serial, surface, hotspot_x, hotspot_y);
+    }
+
 private:
     struct wl_pointer *pointer_;
     struct wl_pointer_listener pointer_listener_{
@@ -314,6 +321,51 @@ private:
     void *shm_data_ = nullptr;
 
     static void handle_buffer_release(void *data, struct wl_buffer *buffer);
+};
+
+class cv_wl_cursor {
+public:
+    friend cv_wl_cursor_theme;
+
+    ~cv_wl_cursor();
+
+    void set_to_mouse(cv_wl_mouse& mouse, uint32_t serial);
+
+    struct wl_surface *get_surface();
+    void commit(int image_index = 0);
+
+private:
+    cv_wl_cursor(weak_ptr<cv_wl_display> const& display, struct wl_cursor *cursor, std::string const& name);
+
+    std::string name_;
+
+    struct wl_cursor *cursor_;
+    struct wl_surface *surface_;
+    struct wl_callback *frame_callback_ = nullptr;
+
+    struct wl_callback_listener frame_listener_{
+        &handle_cursor_frame
+    };
+
+    static void handle_cursor_frame(void *data, struct wl_callback *cb, uint32_t time);
+};
+
+class cv_wl_cursor_theme {
+public:
+    cv_wl_cursor_theme(weak_ptr<cv_wl_display> const& display, std::string const& theme, int size = 32);
+    ~cv_wl_cursor_theme();
+
+    int size() const;
+    std::string const& name() const;
+    weak_ptr<cv_wl_cursor> get_cursor(std::string const& name);
+
+private:
+    int size_;
+    std::string name_;
+    weak_ptr<cv_wl_display> display_;
+    struct wl_cursor_theme *cursor_theme_ = nullptr;
+
+    shared_ptr<cv_wl_cursor> current_cursor_;
 };
 
 /*
@@ -436,20 +488,22 @@ struct cv_wl_mouse_callback {
 
 class cv_wl_window {
 public:
+    enum {
+        DEFAULT_CURSOR_SIZE = 32
+    };
+
     cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string const& name, int flags);
     ~cv_wl_window();
 
     cv::Size get_size() const;
     std::string const& name() const;
 
-    void print_debug_info() const;
-
     void show_image(cv::Mat const& image);
 
     void create_trackbar(std::string const& name, int *value, int count, CvTrackbarCallback2 on_change, void *userdata);
     weak_ptr<cv_wl_trackbar> get_trackbar(std::string const&) const;
 
-    void mouse_enter(int x, int y);
+    void mouse_enter(int x, int y, uint32_t);
     void mouse_leave();
     void mouse_motion(uint32_t time, int x, int y);
     void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state);
@@ -487,6 +541,10 @@ private:
     std::vector<cv::Point> widgets_points_;
 
     cv_wl_mouse_callback on_mouse_;
+
+    uint32_t mouse_enter_serial_;
+    cv_wl_cursor_theme cursor_theme_;
+    weak_ptr<cv_wl_cursor> current_cursor_;
 
     cv_wl_buffer* next_buffer();
     void commit_buffer(cv_wl_buffer *buffer, cv::Rect const&);
@@ -704,7 +762,7 @@ void cv_wl_mouse::handle_pointer_enter(void *data, struct wl_pointer *pointer,
     auto *window = reinterpret_cast<cv_wl_window *>(wl_surface_get_user_data(surface));
 
     mouse->entered_window_.push(window);
-    window->mouse_enter(x, y);
+    window->mouse_enter(x, y, serial);
 }
 
 void cv_wl_mouse::handle_pointer_leave(void *data,
@@ -859,15 +917,11 @@ cv_wl_input::~cv_wl_input()
 
 weak_ptr<cv_wl_mouse> cv_wl_input::mouse()
 {
-    if (!mouse_)
-        throw std::runtime_error("seat: mouse not available");
     return mouse_;
 }
 
 weak_ptr<cv_wl_keyboard> cv_wl_input::keyboard()
 {
-    if (!keyboard_)
-        throw std::runtime_error("seat: keyboard not available");
     return keyboard_;
 }
 
@@ -888,6 +942,206 @@ void cv_wl_input::handle_seat_capabilities(void *data, struct wl_seat *wl_seat, 
 
 void cv_wl_input::handle_seat_name(void *data, struct wl_seat *wl_seat, const char *name)
 {
+}
+
+
+/*
+ * cv_wl_buffer implementation
+ */
+int cv_wl_buffer::number_ = 0;
+
+cv_wl_buffer::cv_wl_buffer()
+{
+}
+
+cv_wl_buffer::~cv_wl_buffer()
+{
+    this->destroy();
+}
+
+void cv_wl_buffer::destroy()
+{
+    if (buffer_) {
+        wl_buffer_destroy(buffer_);
+        buffer_ = nullptr;
+    }
+
+    if (shm_data_ && shm_data_ != MAP_FAILED) {
+        munmap(shm_data_, size_.area() * 4);
+        shm_data_ = nullptr;
+    }
+
+    size_.width = size_.height = 0;
+    shm_unlink(shm_path_.c_str());
+}
+
+void cv_wl_buffer::busy(bool busy)
+{
+    busy_ = busy;
+}
+
+bool cv_wl_buffer::is_busy() const
+{
+    return busy_;
+}
+
+cv::Size cv_wl_buffer::size() const
+{
+    return size_;
+}
+
+bool cv_wl_buffer::is_allocated() const
+{
+    return buffer_ && shm_data_;
+}
+
+char *cv_wl_buffer::data()
+{
+    return (char *)shm_data_;
+}
+
+void cv_wl_buffer::create_shm(struct wl_shm *shm, cv::Size size, uint32_t format)
+{
+    this->destroy();
+
+    size_ = size;
+    int stride = size_.width * 4;
+    int buffer_size = stride * size_.height;
+
+    shm_path_ = "/opencv_shm-" + std::to_string(number_++);
+    int fd = shm_open(shm_path_.c_str(), O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
+    if (fd < 0)
+        CV_Error_(StsNoMem, ("failed to create a shared memory: %s", shm_path_.c_str()));
+
+    if (ftruncate(fd, buffer_size) < 0) {
+        int errno_ = errno;
+        close(fd);
+        throw_system_error("failed to truncate a shm buffer", errno_);
+    }
+
+    shm_data_ = mmap(NULL, buffer_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (shm_data_ == MAP_FAILED) {
+        int errno_ = errno;
+        close(fd);
+        this->destroy();
+        throw_system_error("failed to map shm", errno_);
+    }
+
+    struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, buffer_size);
+    buffer_ = wl_shm_pool_create_buffer(pool, 0, size_.width, size_.height, stride, format);
+    wl_buffer_add_listener(buffer_, &buffer_listener_, this);
+    wl_shm_pool_destroy(pool);
+    close(fd);
+}
+
+void cv_wl_buffer::attach_to_surface(struct wl_surface *surface, int32_t x, int32_t y)
+{
+    wl_surface_attach(surface, buffer_, x, y);
+    this->busy();
+}
+
+void cv_wl_buffer::handle_buffer_release(void *data, struct wl_buffer *buffer)
+{
+    auto *cvbuf = reinterpret_cast<cv_wl_buffer *>(data);
+
+    cvbuf->busy(false);
+}
+
+
+/*
+ * cv_wl_cursor implementation
+ */
+cv_wl_cursor::cv_wl_cursor(weak_ptr<cv_wl_display> const& display, struct wl_cursor *cursor, std::string const& name)
+    : name_(name), cursor_(cursor)
+{
+    surface_ = display.lock()->get_surface();
+}
+
+cv_wl_cursor::~cv_wl_cursor()
+{
+    if (frame_callback_)
+        wl_callback_destroy(frame_callback_);
+    wl_surface_destroy(surface_);
+}
+
+void cv_wl_cursor::set_to_mouse(cv_wl_mouse& mouse, uint32_t serial)
+{
+    auto *cursor_img = cursor_->images[0];
+    mouse.set_cursor(serial, surface_, cursor_img->hotspot_x, cursor_img->hotspot_y);
+}
+
+struct wl_surface *cv_wl_cursor::get_surface()
+{
+    return surface_;
+}
+
+void cv_wl_cursor::commit(int image_index)
+{
+    auto *cursor_img = cursor_->images[image_index];
+    auto *cursor_buffer = wl_cursor_image_get_buffer(cursor_img);
+
+    if (cursor_->image_count > 1) {
+        if (frame_callback_)
+            wl_callback_destroy(frame_callback_);
+
+        frame_callback_ = wl_surface_frame(surface_);
+        wl_callback_add_listener(frame_callback_, &frame_listener_, this);
+    }
+
+    wl_surface_attach(surface_, cursor_buffer, 0, 0);
+    wl_surface_damage(surface_, 0, 0, cursor_img->width, cursor_img->height);
+    wl_surface_commit(surface_);
+}
+
+void cv_wl_cursor::handle_cursor_frame(void *data, struct wl_callback *cb, uint32_t time)
+{
+    auto *cursor = (struct cv_wl_cursor *)data;
+    int image_index = wl_cursor_frame(cursor->cursor_, time);
+
+    cursor->commit(image_index);
+}
+
+
+/*
+ * cv_wl_cursor_theme implementation
+ */
+cv_wl_cursor_theme::cv_wl_cursor_theme(weak_ptr<cv_wl_display> const& display, std::string const& theme, int size)
+    : size_(size), name_(theme), display_(display)
+{
+    cursor_theme_ = wl_cursor_theme_load(theme.c_str(), size, display.lock()->shm());
+    if (!cursor_theme_)
+        CV_Error_(StsInternal, ("Couldn't load cursor theme: %s", theme.c_str()));
+}
+
+cv_wl_cursor_theme::~cv_wl_cursor_theme()
+{
+    if (cursor_theme_)
+        wl_cursor_theme_destroy(cursor_theme_);
+}
+
+int cv_wl_cursor_theme::size() const
+{
+    return size_;
+}
+
+std::string const& cv_wl_cursor_theme::name() const
+{
+    return name_;
+}
+
+weak_ptr<cv_wl_cursor> cv_wl_cursor_theme::get_cursor(std::string const& name)
+{
+    auto *wlcursor = wl_cursor_theme_get_cursor(cursor_theme_, name.c_str());
+    if (!wlcursor)
+        CV_Error_(StsInternal, ("Couldn't load cursor: %s", name.c_str()));
+
+    auto cursor =
+        shared_ptr<cv_wl_cursor>(new cv_wl_cursor(display_, wlcursor, name));
+
+    if (cursor)
+        current_cursor_ = cursor;
+
+    return current_cursor_;
 }
 
 
@@ -1084,113 +1338,12 @@ void cv_wl_trackbar::on_mouse(int event, int x, int y, int flag)
 
 
 /*
- * cv_wl_buffer implementation
- */
-int cv_wl_buffer::number_ = 0;
-
-cv_wl_buffer::cv_wl_buffer()
-{
-}
-
-cv_wl_buffer::~cv_wl_buffer()
-{
-    this->destroy();
-}
-
-void cv_wl_buffer::destroy()
-{
-    if (buffer_) {
-        wl_buffer_destroy(buffer_);
-        buffer_ = nullptr;
-    }
-
-    if (shm_data_ && shm_data_ != MAP_FAILED) {
-        munmap(shm_data_, size_.area() * 4);
-        shm_data_ = nullptr;
-    }
-
-    size_.width = size_.height = 0;
-    shm_unlink(shm_path_.c_str());
-}
-
-void cv_wl_buffer::busy(bool busy)
-{
-    busy_ = busy;
-}
-
-bool cv_wl_buffer::is_busy() const
-{
-    return busy_;
-}
-
-cv::Size cv_wl_buffer::size() const
-{
-    return size_;
-}
-
-bool cv_wl_buffer::is_allocated() const
-{
-    return buffer_ && shm_data_;
-}
-
-char *cv_wl_buffer::data()
-{
-    return (char *)shm_data_;
-}
-
-void cv_wl_buffer::create_shm(struct wl_shm *shm, cv::Size size, uint32_t format)
-{
-    this->destroy();
-
-    size_ = size;
-    int stride = size_.width * 4;
-    int buffer_size = stride * size_.height;
-
-    shm_path_ = "/opencv_shm-" + std::to_string(number_++);
-    int fd = shm_open(shm_path_.c_str(), O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
-    if (fd < 0)
-        throw_system_error("failed to create a shared memory", errno);
-
-    if (ftruncate(fd, buffer_size) < 0) {
-        int errno_ = errno;
-        close(fd);
-        throw_system_error("failed to truncate a shm buffer", errno_);
-    }
-
-    shm_data_ = mmap(NULL, buffer_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (shm_data_ == MAP_FAILED) {
-        int errno_ = errno;
-        close(fd);
-        this->destroy();
-        throw_system_error("failed to map shm", errno_);
-    }
-
-    struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, buffer_size);
-    buffer_ = wl_shm_pool_create_buffer(pool, 0, size_.width, size_.height, stride, format);
-    wl_buffer_add_listener(buffer_, &buffer_listener_, this);
-    wl_shm_pool_destroy(pool);
-    close(fd);
-}
-
-void cv_wl_buffer::attach_to_surface(struct wl_surface *surface, int32_t x, int32_t y)
-{
-    wl_surface_attach(surface, buffer_, x, y);
-    this->busy();
-}
-
-void cv_wl_buffer::handle_buffer_release(void *data, struct wl_buffer *buffer)
-{
-    auto *cvbuf = reinterpret_cast<cv_wl_buffer *>(data);
-
-    cvbuf->busy(false);
-}
-
-
-/*
  * cv_wl_window implementation
  */
 cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string const& name, int flags)
-    : name_(name), display_(display), surface_(display->get_surface())
+    :   name_(name), display_(display),
+        surface_(display->get_surface()),
+        cursor_theme_(display, "default", DEFAULT_CURSOR_SIZE)
 {
     shell_surface_ = display->get_shell_surface(surface_);
     if (!shell_surface_)
@@ -1347,18 +1500,6 @@ void cv_wl_window::show()
     this->commit_buffer(buffer, surface_damage);
 }
 
-void cv_wl_window::print_debug_info() const
-{
-#if !defined(NDEBUG)
-    std::cerr << "[*] DEBUG: buffer0@" << std::hex << &buffers_[0] << ".busy=" << buffers_[0].is_busy()
-        << " buffer1@" << &buffers_[1] << ".busy=" << buffers_[1].is_busy()
-        << " pending_.repaint_request=" << pending_.repaint_request
-        << " next_frame_ready=" << next_frame_ready_
-        << " buffer_size=" << size_
-        << std::endl;
-#endif
-}
-
 void cv_wl_window::commit_buffer(cv_wl_buffer *buffer, cv::Rect const& damage)
 {
     if (!buffer)
@@ -1388,10 +1529,18 @@ void cv_wl_window::handle_frame_callback(void *data, struct wl_callback *cb, uin
     }
 }
 
-void cv_wl_window::mouse_enter(int x, int y)
+void cv_wl_window::mouse_enter(int x, int y, uint32_t serial)
 {
     on_mouse_.last_x = x;
     on_mouse_.last_y = y;
+    mouse_enter_serial_ = serial;
+
+    current_cursor_ = cursor_theme_.get_cursor("left_ptr");
+    current_cursor_.lock()->set_to_mouse(
+        *display_->input().lock()->mouse().lock(),
+        mouse_enter_serial_
+    );
+    current_cursor_.lock()->commit();
 
     for (size_t i = 0; i < widgets_.size(); ++i) {
         auto size = widgets_[i]->get_last_size();
