@@ -3,7 +3,6 @@
  * TODO:
  *  Resizing
  *  Support WINDOW_NORMAL in cv_wl_window and cv_wl_viewer
- *  Support Cursor theme
  */
 
 #include "precomp.hpp"
@@ -21,6 +20,7 @@
 #include <memory>
 #include <system_error>
 #include <chrono>
+#include <unordered_map>
 
 #include <unistd.h>
 #include <sys/mman.h>
@@ -221,10 +221,7 @@ public:
     cv_wl_mouse(struct wl_pointer *pointer);
     ~cv_wl_mouse();
 
-    void set_cursor(uint32_t serial, struct wl_surface *surface, int32_t hotspot_x, int32_t hotspot_y)
-    {
-        wl_pointer_set_cursor(pointer_, serial, surface, hotspot_x, hotspot_y);
-    }
+    void set_cursor(uint32_t serial, struct wl_surface *surface, int32_t hotspot_x, int32_t hotspot_y);
 
 private:
     struct wl_pointer *pointer_;
@@ -329,6 +326,7 @@ public:
 
     ~cv_wl_cursor();
 
+    std::string const& name() const;
     void set_to_mouse(cv_wl_mouse& mouse, uint32_t serial);
 
     struct wl_surface *get_surface();
@@ -365,7 +363,10 @@ private:
     weak_ptr<cv_wl_display> display_;
     struct wl_cursor_theme *cursor_theme_ = nullptr;
 
-    shared_ptr<cv_wl_cursor> current_cursor_;
+    std::unordered_map<
+        std::string,
+        shared_ptr<cv_wl_cursor>
+    > cursors_;
 };
 
 /*
@@ -543,10 +544,13 @@ private:
     cv_wl_mouse_callback on_mouse_;
 
     uint32_t mouse_enter_serial_;
-    cv_wl_cursor_theme cursor_theme_;
-    weak_ptr<cv_wl_cursor> current_cursor_;
+    struct {
+        std::string current_name;
+        cv_wl_cursor_theme theme;
+    } cursor_;
 
     cv_wl_buffer* next_buffer();
+    void update_cursor(int x, int y, uint32_t serial);
     void commit_buffer(cv_wl_buffer *buffer, cv::Rect const&);
     static void handle_surface_configure(void *, struct xdg_surface *, int32_t, int32_t, struct wl_array *, uint32_t);
     static void handle_surface_close(void *data, struct xdg_surface *xdg_surface);
@@ -751,6 +755,11 @@ cv_wl_mouse::cv_wl_mouse(struct wl_pointer *pointer)
 cv_wl_mouse::~cv_wl_mouse()
 {
     wl_pointer_destroy(pointer_);
+}
+
+void cv_wl_mouse::set_cursor(uint32_t serial, struct wl_surface *surface, int32_t hotspot_x, int32_t hotspot_y)
+{
+    wl_pointer_set_cursor(pointer_, serial, surface, hotspot_x, hotspot_y);
 }
 
 void cv_wl_mouse::handle_pointer_enter(void *data, struct wl_pointer *pointer,
@@ -1064,6 +1073,11 @@ cv_wl_cursor::~cv_wl_cursor()
     wl_surface_destroy(surface_);
 }
 
+std::string const& cv_wl_cursor::name() const
+{
+    return name_;
+}
+
 void cv_wl_cursor::set_to_mouse(cv_wl_mouse& mouse, uint32_t serial)
 {
     auto *cursor_img = cursor_->images[0];
@@ -1106,7 +1120,7 @@ void cv_wl_cursor::handle_cursor_frame(void *data, struct wl_callback *cb, uint3
  * cv_wl_cursor_theme implementation
  */
 cv_wl_cursor_theme::cv_wl_cursor_theme(weak_ptr<cv_wl_display> const& display, std::string const& theme, int size)
-    : size_(size), name_(theme), display_(display)
+    : size_(size), name_(theme), display_(display), cursors_()
 {
     cursor_theme_ = wl_cursor_theme_load(theme.c_str(), size, display.lock()->shm());
     if (!cursor_theme_)
@@ -1131,17 +1145,21 @@ std::string const& cv_wl_cursor_theme::name() const
 
 weak_ptr<cv_wl_cursor> cv_wl_cursor_theme::get_cursor(std::string const& name)
 {
+    if (cursors_.count(name) == 1)
+        return cursors_[name];
+
     auto *wlcursor = wl_cursor_theme_get_cursor(cursor_theme_, name.c_str());
     if (!wlcursor)
         CV_Error_(StsInternal, ("Couldn't load cursor: %s", name.c_str()));
 
     auto cursor =
         shared_ptr<cv_wl_cursor>(new cv_wl_cursor(display_, wlcursor, name));
+    if (!cursor)
+        CV_Error_(StsInternal, ("Couldn't allocate memory for cursor: %s", name.c_str()));
 
-    if (cursor)
-        current_cursor_ = cursor;
+    cursors_[name] = cursor;
 
-    return current_cursor_;
+    return cursor;
 }
 
 
@@ -1343,7 +1361,7 @@ void cv_wl_trackbar::on_mouse(int event, int x, int y, int flag)
 cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string const& name, int flags)
     :   name_(name), display_(display),
         surface_(display->get_surface()),
-        cursor_theme_(display, "default", DEFAULT_CURSOR_SIZE)
+        cursor_{{}, {display, "default", DEFAULT_CURSOR_SIZE}}
 {
     shell_surface_ = display->get_shell_surface(surface_);
     if (!shell_surface_)
@@ -1529,18 +1547,59 @@ void cv_wl_window::handle_frame_callback(void *data, struct wl_callback *cb, uin
     }
 }
 
+static std::string get_cursor_name(int x, int y, cv::Size const& size)
+{
+    std::string cursor;
+
+    if (0 <= y && y <= 10) {
+        cursor = "top_";
+        if (0 <= x && x <= 10)
+            cursor += "left_corner";
+        else if (size.width -10 <= x && x <= size.width)
+            cursor += "right_corner";
+        else
+            cursor += "side";
+    } else if (size.height - 10 <= y && y <= size.height) {
+        cursor = "bottom_";
+        if (0 <= x && x <= 10)
+            cursor += "left_corner";
+        else if (size.width - 10 <= x && x <= size.width)
+            cursor += "right_corner";
+        else
+            cursor += "side";
+    } else if (0 <= x && x <= 10) {
+        cursor = "left_side";
+    } else if (size.width - 10 <= x && x <= size.width) {
+        cursor = "right_side";
+    } else {
+        cursor = "left_ptr";
+    }
+
+    return cursor;
+}
+
+void cv_wl_window::update_cursor(int x, int y, uint32_t serial)
+{
+    auto cursor_name = get_cursor_name(x, y, size_);
+    if (cursor_.current_name == cursor_name)
+        return;
+
+    cursor_.current_name = cursor_name;
+    auto cursor = cursor_.theme.get_cursor(cursor_name);
+    cursor.lock()->set_to_mouse(
+        *display_->input().lock()->mouse().lock(),
+        mouse_enter_serial_
+    );
+    cursor.lock()->commit();
+}
+
 void cv_wl_window::mouse_enter(int x, int y, uint32_t serial)
 {
     on_mouse_.last_x = x;
     on_mouse_.last_y = y;
     mouse_enter_serial_ = serial;
 
-    current_cursor_ = cursor_theme_.get_cursor("left_ptr");
-    current_cursor_.lock()->set_to_mouse(
-        *display_->input().lock()->mouse().lock(),
-        mouse_enter_serial_
-    );
-    current_cursor_.lock()->commit();
+    this->update_cursor(x, y, mouse_enter_serial_);
 
     for (size_t i = 0; i < widgets_.size(); ++i) {
         auto size = widgets_[i]->get_last_size();
@@ -1555,6 +1614,7 @@ void cv_wl_window::mouse_enter(int x, int y, uint32_t serial)
 
 void cv_wl_window::mouse_leave()
 {
+    cursor_.current_name.clear();
 }
 
 void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
@@ -1562,6 +1622,8 @@ void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
     int flag = 0;
     on_mouse_.last_x = x;
     on_mouse_.last_y = y;
+
+    this->update_cursor(x, y, mouse_enter_serial_);
 
     if (on_mouse_.drag) {
         switch (on_mouse_.button) {
