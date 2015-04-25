@@ -213,9 +213,9 @@ class cv_wl_mouse {
 public:
     enum button {
         NONE = 0,
-        LBUTTON = 272,
-        RBUTTON = 273,
-        MBUTTON = 274,
+        LBUTTON = BTN_LEFT,
+        RBUTTON = BTN_RIGHT,
+        MBUTTON = BTN_MIDDLE,
     };
 
     cv_wl_mouse(struct wl_pointer *pointer);
