@@ -491,7 +491,7 @@ public:
     ~cv_wl_window();
 
     cv::Size get_size() const;
-    std::string const& name() const;
+    std::string const& get_title() const;
     void set_title(std::string const& title);
 
     void show_image(cv::Mat const& image);
@@ -511,7 +511,7 @@ public:
 
 private:
     cv::Size size_{640, 480};
-    std::string const name_;
+    std::string title_;
 
     shared_ptr<cv_wl_display> display_;
     struct wl_surface *surface_;
@@ -1373,8 +1373,8 @@ void cv_wl_trackbar::on_mouse(int event, int x, int y, int flag)
 /*
  * cv_wl_window implementation
  */
-cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string const& name, int flags)
-    :   name_(name), display_(display),
+cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string const& title, int flags)
+    :   title_(title), display_(display),
         surface_(display->get_surface()),
         cursor_{{}, {display, "default", DEFAULT_CURSOR_SIZE}}
 {
@@ -1383,7 +1383,7 @@ cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string
         CV_Error(StsInternal, "Failed to get xdg_surface");
 
     xdg_surface_add_listener(shell_surface_, &shsurf_listener, this);
-    xdg_surface_set_title(shell_surface_, name_.c_str());
+    xdg_surface_set_title(shell_surface_, title_.c_str());
 
     wl_surface_set_user_data(surface_, this);
 
@@ -1404,14 +1404,15 @@ cv::Size cv_wl_window::get_size() const
     return size_;
 }
 
-std::string const& cv_wl_window::name() const
+std::string const& cv_wl_window::get_title() const
 {
-    return name_;
+    return title_;
 }
 
 void cv_wl_window::set_title(std::string const& title)
 {
-    xdg_surface_set_title(shell_surface_, title.c_str());
+    title_ = title;
+    xdg_surface_set_title(shell_surface_, title_.c_str());
 }
 
 cv_wl_buffer* cv_wl_window::next_buffer()
@@ -1882,7 +1883,7 @@ bool cv_wl_core::create_window(std::string const& name, int flags)
 {
     auto window = std::make_shared<cv_wl_window>(display_, name, flags);
     auto result = windows_.insert(std::make_pair(name, window));
-    handles_[window.get()] = window->name();
+    handles_[window.get()] = window->get_title();
     return result.second;
 }
 
