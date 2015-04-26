@@ -68,10 +68,8 @@ extern shared_ptr<cv_wl_core> cv_core;
 
 #define POINT_FROM_RECT(rect) (cv::Point((rect.x), (rect.y)))
 
-static void throw_system_error(std::string const& errmsg, int err)
-{
-    throw std::system_error(err, std::system_category(), errmsg);
-}
+#define throw_system_error(errmsg, errnum) \
+    CV_Error_(StsInternal, ("%s: %s", errmsg, strerror(errnum)));
 
 static int xkb_keysym_to_ascii(xkb_keysym_t keysym)
 {
@@ -690,11 +688,11 @@ void cv_wl_display::init()
     wl_registry_add_listener(registry_, &reg_listener_, this);
     wl_display_roundtrip(display_);
     if (!compositor_ || !shm_ || !shell_ || !input_)
-        throw std::runtime_error("Compositor doesn't have required interfaces");
+        CV_Error(StsInternal, "Compositor doesn't have required interfaces");
 
     wl_display_roundtrip(display_);
     if (!(formats_ & (1 << WL_SHM_FORMAT_XRGB8888)))
-        throw std::runtime_error("WL_SHM_FORMAT_XRGB32 not available");
+        CV_Error(StsInternal, "WL_SHM_FORMAT_XRGB32 not available");
 
     poller_.add(
         wl_display_get_fd(display_),
@@ -817,7 +815,7 @@ cv_wl_keyboard::cv_wl_keyboard(struct wl_keyboard *keyboard)
 {
     xkb_.ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     if (!xkb_.ctx)
-        throw std::runtime_error("Failed to create xkb context");
+        CV_Error(StsNoMem, "Failed to create xkb context");
     wl_keyboard_add_listener(keyboard_, &keyboard_listener_, this);
 }
 
@@ -911,8 +909,6 @@ void cv_wl_keyboard::handle_kb_repeat(void *data, struct wl_keyboard *wl_keyboar
 cv_wl_input::cv_wl_input(struct wl_seat *seat)
     :   seat_(seat)
 {
-    if (!seat_)
-        throw std::runtime_error("Invalid seat detected when initializing");
     wl_seat_add_listener(seat_, &seat_listener_, this);
 }
 
@@ -1383,7 +1379,7 @@ cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string
 {
     shell_surface_ = display->get_shell_surface(surface_);
     if (!shell_surface_)
-        throw std::runtime_error("Failed to get xdg_surface");
+        CV_Error(StsInternal, "Failed to get xdg_surface");
 
     xdg_surface_add_listener(shell_surface_, &shsurf_listener, this);
     xdg_surface_set_title(shell_surface_, name_.c_str());
@@ -1844,7 +1840,7 @@ void cv_wl_core::init()
 {
     display_ = std::make_shared<cv_wl_display>();
     if (!display_)
-        throw std::runtime_error("Could not create display");
+        CV_Error(StsNoMem, "Could not create display");
     display_->roundtrip();
 }
 
@@ -1903,7 +1899,7 @@ void cv_wl_core::destroy_all_windows()
 shared_ptr<cv_wl_core> cv_core;
 
 CV_IMPL int cvInitSystem(int argc, char **argv)
-try {
+{
     if (!cv_core) {
         cv_core = std::make_shared<cv_wl_core>();
         if (!cv_core)
@@ -1913,110 +1909,88 @@ try {
     }
 
     return 0;
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL int cvStartWindowThread()
-try {
+{
     cvInitSystem(0, NULL);
 
     return 0;
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL int cvNamedWindow(const char *name, int flags)
-try {
+{
     cvInitSystem(1, (char **)&name);
 
     return cv_core->create_window(name, flags);
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvDestroyWindow(const char* name)
-try {
+{
     cvInitSystem(0, NULL);
 
     cv_core->destroy_window(name);
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvDestroyAllWindows()
-try {
+{
     cvInitSystem(0, NULL);
 
     cv_core->destroy_all_windows();
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void* cvGetWindowHandle(const char* name)
-try {
+{
     cvInitSystem(0, NULL);
 
     return cv_core->get_window_handle(name);
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL const char* cvGetWindowName(void* window_handle)
-try {
+{
     cvInitSystem(0, NULL);
 
     return cv_core->get_window_name(window_handle).c_str();
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvMoveWindow(const char* name, int x, int y)
-try {
+{
     /*
      * We cannot move window surfaces not with the user actions in Wayland
      * Only a wayland compositor is allowed to do it
      * So this function is not implemented
      */
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvResizeWindow(const char* name, int width, int height)
-try {
+{
     cvInitSystem(0, NULL);
 
     auto window = cv_core->get_window(name);
     window->show(cv::Size(width, height));
 
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL int cvCreateTrackbar(const char* name_bar, const char* window_name, int* value, int count, CvTrackbarCallback on_change)
-try {
+{
     //auto window = cv_core->get_window(window_name);
 
     //window->create_trackbar(name_bar, value, count, on_change, nullptr);
     return 0;
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL int cvCreateTrackbar2(const char* trackbar_name, const char* window_name, int* val, int count, CvTrackbarCallback2 on_notify, void* userdata)
-try {
+{
     cvInitSystem(0, NULL);
 
     auto window = cv_core->get_window(window_name);
     window->create_trackbar(trackbar_name, val, count, on_notify, userdata);
 
     return 0;
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL int cvGetTrackbarPos(const char* trackbar_name, const char* window_name)
-try {
+{
     cvInitSystem(0, NULL);
 
     auto window = cv_core->get_window(window_name);
@@ -2026,12 +2000,10 @@ try {
         return trackbar->get_pos();
 
     return -1;
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvSetTrackbarPos(const char* trackbar_name, const char* window_name, int pos)
-try {
+{
     cvInitSystem(0, NULL);
 
     auto window = cv_core->get_window(window_name);
@@ -2039,12 +2011,10 @@ try {
     auto trackbar_ptr = window->get_trackbar(trackbar_name);
     if (auto trackbar = trackbar_ptr.lock())
         trackbar->set_pos(pos);
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvSetTrackbarMax(const char* trackbar_name, const char* window_name, int maxval)
-try {
+{
     cvInitSystem(0, NULL);
 
     auto window = cv_core->get_window(window_name);
@@ -2052,23 +2022,19 @@ try {
     auto trackbar_ptr = window->get_trackbar(trackbar_name);
     if (auto trackbar = trackbar_ptr.lock())
         trackbar->set_max(maxval);
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvSetMouseCallback(const char* window_name, CvMouseCallback on_mouse, void* param)
-try {
+{
     cvInitSystem(0, NULL);
 
     auto window = cv_core->get_window(window_name);
 
     window->set_mouse_callback(on_mouse, param);
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
-try {
+{
     cvInitSystem(0, NULL);
 
     shared_ptr<cv_wl_window> window;
@@ -2082,12 +2048,10 @@ try {
     cv::Mat mat = cv::cvarrToMat(arr, true);
     window->show_image(mat);
     window->show();
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 CV_IMPL int cvWaitKey(int delay)
-try {
+{
     cvInitSystem(0, NULL);
 
     int key = -1;
@@ -2119,8 +2083,6 @@ try {
     }
 
     return key;
-} catch (std::exception& e) {
-    CV_ErrorNoReturn(StsInternal, e.what());
 }
 
 #ifdef HAVE_OPENGL
