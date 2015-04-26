@@ -1,8 +1,9 @@
 /*
  * Wayland Backend
  * TODO:
- *  Resizing
  *  Support WINDOW_NORMAL in cv_wl_window and cv_wl_viewer
+ *  Minimum widget size support for resizing
+ *  Keyboard: handle modifiers
  */
 
 #include "precomp.hpp"
@@ -66,13 +67,6 @@ namespace ch = std::chrono;
 
 extern shared_ptr<cv_wl_core> cv_core;
 
-template<typename Container>
-static void clear_container(Container& cont)
-{
-    Container empty_container;
-    std::swap(cont, empty_container);
-}
-
 static void throw_system_error(std::string const& errmsg, int err)
 {
     throw std::system_error(err, std::system_category(), errmsg);
@@ -80,7 +74,7 @@ static void throw_system_error(std::string const& errmsg, int err)
 
 static int xkb_keysym_to_ascii(xkb_keysym_t keysym)
 {
-    /* Remove most significant 8 bytes (0xff00) */
+    /* Remove most significant 8 bytes (0xff) */
     return static_cast<uint8_t>(keysym);
 }
 
@@ -101,6 +95,9 @@ static void draw_argb8888(void *d, uint8_t a, uint8_t r, uint8_t g, uint8_t b)
 
 static void write_mat_to_xrgb8888(cv::Mat const& img, void *data)
 {
+    assert(data != nullptr);
+    assert(img.isContinuous());
+
     for (int y = 0; y < img.rows; y++) {
         for (int x = 0; x < img.cols; x++) {
             auto p = img.at<cv::Vec3b>(y, x);
@@ -363,10 +360,7 @@ private:
     weak_ptr<cv_wl_display> display_;
     struct wl_cursor_theme *cursor_theme_ = nullptr;
 
-    std::unordered_map<
-        std::string,
-        shared_ptr<cv_wl_cursor>
-    > cursors_;
+    std::unordered_map<std::string, shared_ptr<cv_wl_cursor>> cursors_;
 };
 
 /*
@@ -408,6 +402,7 @@ public:
 
     cv_wl_viewer(cv_wl_window *, int flags);
 
+    int get_flags() const { return flags_; }
     void set_image(cv::Mat const& img);
     void set_mouse_callback(CvMouseCallback callback, void *param);
 
@@ -504,17 +499,18 @@ public:
     void create_trackbar(std::string const& name, int *value, int count, CvTrackbarCallback2 on_change, void *userdata);
     weak_ptr<cv_wl_trackbar> get_trackbar(std::string const&) const;
 
-    void mouse_enter(int x, int y, uint32_t);
+    void mouse_enter(int x, int y, uint32_t serial);
     void mouse_leave();
     void mouse_motion(uint32_t time, int x, int y);
-    void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state);
+    void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state, uint32_t serial);
 
     void set_mouse_callback(CvMouseCallback on_mouse, void *param);
 
-    void show();
+    cv::Size calculate_window_size(cv::Size const& new_size);
+    void show(cv::Size const& new_size = cv::Size(0, 0));
 
 private:
-    cv::Size size_{0, 0};
+    cv::Size size_{640, 480};
     std::string const name_;
 
     shared_ptr<cv_wl_display> display_;
@@ -534,10 +530,13 @@ private:
 
     struct {
         bool repaint_request = false;  /* we need to redraw as soon as possible (some states are changed) */
+        bool resize_request = false;
+        cv::Size size{0, 0};
     } pending_;
 
     shared_ptr<cv_wl_viewer> viewer_;
     cv::Point viewer_point_{0, 0};
+
     std::vector<shared_ptr<cv_wl_widget>> widgets_;
     std::vector<cv::Point> widgets_points_;
 
@@ -801,7 +800,7 @@ void cv_wl_mouse::handle_pointer_button(void *data, struct wl_pointer *wl_pointe
     auto *mouse = reinterpret_cast<cv_wl_mouse *>(data);
     auto *window = mouse->entered_window_.front();
 
-    window->mouse_button(time, button, static_cast<wl_pointer_button_state>(state));
+    window->mouse_button(time, button, static_cast<wl_pointer_button_state>(state), serial);
 }
 
 void cv_wl_mouse::handle_pointer_axis(void *data, struct wl_pointer *wl_pointer,
@@ -1218,6 +1217,10 @@ void cv_wl_viewer::on_mouse(int event, int x, int y, int flag)
             last_flag = flag;
             last_event_time = now;
 
+            /* Scale the coordinate to match the client's image coordinate */
+            x = x * ((double)image_.size().width / last_size_.width);
+            y = y * ((double)image_.size().height / last_size_.height);
+
             callback_(event, x, y, flag, param_);
         }
     }
@@ -1225,12 +1228,16 @@ void cv_wl_viewer::on_mouse(int event, int x, int y, int flag)
 
 cv::Rect cv_wl_viewer::draw(void *data, cv::Size const& size, bool force)
 {
-    if ((!force && !image_changed_) || image_.size().area() == 0 || size.area() == 0)
+    if ((!force && !image_changed_ && last_size_ == size) || image_.size().area() == 0 || size.area() == 0)
         return cv::Rect(0, 0, 0, 0);
 
-    if (flags_ & cv::WINDOW_AUTOSIZE) {
+    if (flags_ & cv::WINDOW_AUTOSIZE || image_.size() == size) {
         assert(image_.size() == size);
         write_mat_to_xrgb8888(image_, data);
+    } else {
+        cv::Mat resized;
+        cv::resize(image_, resized, size);
+        write_mat_to_xrgb8888(resized, data);
     }
 
     last_size_ = size;
@@ -1450,43 +1457,42 @@ static void calculate_damage(cv::Rect& surface_damage, cv::Rect const& widget_da
     }
 }
 
-void cv_wl_window::show()
+cv::Size cv_wl_window::calculate_window_size(cv::Size const& new_size)
+{
+    cv::Size size = new_size;
+
+    if (viewer_->get_flags() & cv::WINDOW_AUTOSIZE) {
+        int total_height = 0;
+        int max_width = viewer_->get_preferred_width();
+
+        /* Ask each widget how long width do they need */
+        /* And fit with the longest width (mostly the viewer) */
+        for (auto& widget : widgets_)
+            max_width = std::max(max_width, widget->get_preferred_width());
+
+        /* Ask each widget how long height do they need for the given width */
+        /* The total height becomes the actual height of the window */
+        for (auto& widget : widgets_)
+            total_height += widget->get_preferred_height_for_width(max_width);
+        total_height += viewer_->get_preferred_height_for_width(max_width);
+
+        size = cv::Size(max_width, total_height);
+    }
+
+    return size;
+}
+
+void cv_wl_window::show(cv::Size const& new_size)
 {
     auto *buffer = this->next_buffer();
-#if !defined(NDEBUG)
-    std::cerr << "[*] DEBUG: buffer0@" << std::hex << &buffers_[0] << ".busy=" << buffers_[0].is_busy()
-        << " buffer1@" << &buffers_[1] << ".busy=" << buffers_[1].is_busy()
-        << " pending_.repaint_request=" << pending_.repaint_request
-        << " next_frame_ready=" << next_frame_ready_
-        << " buffer_available=" << (buffer ? true : false)
-        << " buffer=" << buffer << std::dec
-        << std::endl;
-#endif
     if (!next_frame_ready_ || !buffer) {
         pending_.repaint_request = true;
         return;
     }
 
-    int total_height = 0;
-    int max_width = viewer_->get_preferred_width();
-    std::vector<int> height_list;
-
-    /* Ask each widget how long width do they need */
-    /* And fit with the longest width (mostly the viewer) */
-    for (auto& widget : widgets_)
-        max_width = std::max(max_width, widget->get_preferred_width());
-
-    /* Ask each widget how long height do they need for the given width */
-    /* The total height becomes the actual height of the window */
-    for (auto& widget : widgets_) {
-        height_list.push_back(widget->get_preferred_height_for_width(max_width));
-        total_height += height_list.back();
-    }
-    height_list.push_back(viewer_->get_preferred_height_for_width(max_width));
-    total_height += height_list.back();
-
     /* The actual size of a surface */
-    size_ = cv::Size(max_width, total_height);
+    auto next_size = this->calculate_window_size(new_size);
+    size_ = next_size.area() == 0 ? size_ : next_size;
 
     bool buffer_size_changed = (buffer->size() != size_);
     if (!buffer->is_allocated() || buffer_size_changed)
@@ -1495,21 +1501,22 @@ void cv_wl_window::show()
     int curr_height = 0;
     auto surface_damage = cv::Rect(cv::Point(size_), cv::Size(0, 0));
     for (size_t i = 0; i < widgets_.size(); ++i) {
+        int height = widgets_[i]->get_preferred_height_for_width(size_.width);
         auto widget_damage = widgets_[i]->draw(
-            buffer->data() + (max_width * curr_height * 4),
-            cv::Size(max_width, height_list[i]),
+            buffer->data() + (size_.width * curr_height * 4),
+            cv::Size(size_.width, height),
             buffer_size_changed
         );
 
         calculate_damage(surface_damage, widget_damage, curr_height);
 
         widgets_points_[i] = cv::Point(0, curr_height);
-        curr_height += height_list[i];
+        curr_height += height;
     }
 
     auto viewer_damage = viewer_->draw(
-        buffer->data() + (max_width * curr_height * 4),
-        cv::Size(max_width, height_list.back()),
+        buffer->data() + (size_.width * curr_height * 4),
+        cv::Size(size_.width, size_.height - curr_height),
         buffer_size_changed
     );
     calculate_damage(surface_damage, viewer_damage, curr_height);
@@ -1541,17 +1548,23 @@ void cv_wl_window::handle_frame_callback(void *data, struct wl_callback *cb, uin
 
     window->next_frame_ready_ = true;
 
-    if (window->pending_.repaint_request) {
+    if (window->pending_.resize_request) {
+        window->pending_.resize_request = false;
+        window->pending_.repaint_request = false;
+        window->show(window->pending_.size);
+    } else if (window->pending_.repaint_request) {
         window->pending_.repaint_request = false;
         window->show();
     }
 }
 
-static std::string get_cursor_name(int x, int y, cv::Size const& size)
+static std::string get_cursor_name(int x, int y, cv::Size const& size, bool drag = false)
 {
     std::string cursor;
 
-    if (0 <= y && y <= 10) {
+    if (drag) {
+        cursor = "grabbing";
+    } else if (0 <= y && y <= 10) {
         cursor = "top_";
         if (0 <= x && x <= 10)
             cursor += "left_corner";
@@ -1578,9 +1591,23 @@ static std::string get_cursor_name(int x, int y, cv::Size const& size)
     return cursor;
 }
 
+static xdg_surface_resize_edge cursor_name_to_enum(std::string const& cursor)
+{
+
+    if (cursor == "top_left_corner") return XDG_SURFACE_RESIZE_EDGE_TOP_LEFT;
+    else if (cursor == "top_right_corner") return XDG_SURFACE_RESIZE_EDGE_TOP_RIGHT;
+    else if (cursor == "top_side") return XDG_SURFACE_RESIZE_EDGE_TOP;
+    else if (cursor == "bottom_left_corner") return XDG_SURFACE_RESIZE_EDGE_BOTTOM_LEFT;
+    else if (cursor == "bottom_right_corner") return XDG_SURFACE_RESIZE_EDGE_BOTTOM_RIGHT;
+    else if (cursor == "bottom_side") return XDG_SURFACE_RESIZE_EDGE_BOTTOM;
+    else if (cursor == "left_side") return XDG_SURFACE_RESIZE_EDGE_LEFT;
+    else if (cursor == "right_side") return XDG_SURFACE_RESIZE_EDGE_RIGHT;
+    else return XDG_SURFACE_RESIZE_EDGE_NONE;
+}
+
 void cv_wl_window::update_cursor(int x, int y, uint32_t serial)
 {
-    auto cursor_name = get_cursor_name(x, y, size_);
+    auto cursor_name = get_cursor_name(x, y, size_, on_mouse_.drag);
     if (cursor_.current_name == cursor_name)
         return;
 
@@ -1652,11 +1679,28 @@ void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
         viewer_->on_mouse(cv::EVENT_MOUSEMOVE, x, y - viewer_point_.y, flag);
 }
 
-void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state)
+void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state, uint32_t serial)
 {
     int event = 0, flag = 0;
+
+    /* Start a user-driven, interactive resize of the surface */
+    if (WL_POINTER_BUTTON_STATE_PRESSED && !on_mouse_.drag &&
+        button == cv_wl_mouse::LBUTTON && cursor_.current_name != "left_ptr" &&
+         !(viewer_->get_flags() & cv::WINDOW_AUTOSIZE)) {
+        xdg_surface_resize(
+            shell_surface_,
+            display_->input().lock()->seat(),
+            serial,
+            cursor_name_to_enum(cursor_.current_name)
+        );
+        return;
+    }
+
     on_mouse_.button = static_cast<cv_wl_mouse::button>(button);
     on_mouse_.drag = (state == WL_POINTER_BUTTON_STATE_PRESSED);
+
+    this->update_cursor(on_mouse_.last_x, on_mouse_.last_y, mouse_enter_serial_);
+
     switch (button) {
     case cv_wl_mouse::LBUTTON:
         event = on_mouse_.drag ? cv::EVENT_LBUTTONDOWN : cv::EVENT_LBUTTONUP;
@@ -1689,7 +1733,35 @@ void cv_wl_window::handle_surface_configure(
     void *data, struct xdg_surface *surface,
     int32_t width, int32_t height, struct wl_array *states, uint32_t serial)
 {
-    //auto *window = reinterpret_cast<cv_wl_window *>(data);
+    void *p;
+    auto size = cv::Size(width, height);
+    auto *window = reinterpret_cast<cv_wl_window *>(data);
+
+    wl_array_for_each(p, states) {
+        uint32_t state = *((uint32_t *)p);
+        switch (state) {
+        case XDG_SURFACE_STATE_MAXIMIZED:
+            break;
+        case XDG_SURFACE_STATE_FULLSCREEN:
+            break;
+        case XDG_SURFACE_STATE_RESIZING:
+            if (size.area() != 0) {
+                if (window->next_frame_ready_) {
+                    window->show(size);
+                } else {
+                    window->pending_.size = size;
+                    window->pending_.resize_request = true;
+                }
+            }
+            break;
+        case XDG_SURFACE_STATE_ACTIVATED:
+            break;
+        default:
+            /* Unknown state */
+            break;
+        }
+    }
+
     xdg_surface_ack_configure(surface, serial);
 }
 
@@ -1857,6 +1929,10 @@ try {
 CV_IMPL void cvResizeWindow(const char* name, int width, int height)
 try {
     cvInitSystem(0, NULL);
+
+    auto window = cv_core->get_window(name);
+    window->show(cv::Size(width, height));
+
 } catch (std::exception& e) {
     CV_ErrorNoReturn(StsInternal, e.what());
 }
