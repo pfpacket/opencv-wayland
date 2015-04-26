@@ -2,7 +2,6 @@
  * Wayland Backend
  * TODO:
  *  Support WINDOW_NORMAL in cv_wl_window and cv_wl_viewer
- *  Minimum widget size support for resizing
  *  Keyboard: handle modifiers
  */
 
@@ -66,6 +65,8 @@ using namespace cv::Error;
 namespace ch = std::chrono;
 
 extern shared_ptr<cv_wl_core> cv_core;
+
+#define POINT_FROM_RECT(rect) (cv::Point((rect.x), (rect.y)))
 
 static void throw_system_error(std::string const& errmsg, int err)
 {
@@ -381,8 +382,8 @@ public:
         return last_size_;
     }
 
-    virtual int get_preferred_width() const = 0;
-    virtual int get_preferred_height_for_width(int width) const = 0;
+    virtual void get_preferred_width(int& minimum, int& natural) const = 0;
+    virtual void get_preferred_height_for_width(int width, int& minimum, int& natural) const = 0;
 
     virtual void on_mouse(int event, int x, int y, int flag) {}
 
@@ -406,8 +407,8 @@ public:
     void set_image(cv::Mat const& img);
     void set_mouse_callback(CvMouseCallback callback, void *param);
 
-    int get_preferred_width() const override;
-    int get_preferred_height_for_width(int width) const override;
+    void get_preferred_width(int& minimum, int& natural) const override;
+    void get_preferred_height_for_width(int width, int& minimum, int& natural) const override;
     void on_mouse(int event, int x, int y, int flag) override;
     cv::Rect draw(void *data, cv::Size const&, bool force) override;
 
@@ -430,8 +431,8 @@ public:
     void set_pos(int value);
     void set_max(int count);
 
-    int get_preferred_width() const override;
-    int get_preferred_height_for_width(int width) const override;
+    void get_preferred_width(int& minimum, int& natural) const override;
+    void get_preferred_height_for_width(int width, int& minimum, int& natural) const override;
     void on_mouse(int event, int x, int y, int flag) override;
     cv::Rect draw(void *data, cv::Size const& size, bool force) override;
 
@@ -506,7 +507,7 @@ public:
 
     void set_mouse_callback(CvMouseCallback on_mouse, void *param);
 
-    cv::Size calculate_window_size(cv::Size const& new_size);
+    std::tuple<cv::Size, std::vector<cv::Rect>> manage_widget_geometry(cv::Size const& new_size);
     void show(cv::Size const& new_size = cv::Size(0, 0));
 
 private:
@@ -535,10 +536,9 @@ private:
     } pending_;
 
     shared_ptr<cv_wl_viewer> viewer_;
-    cv::Point viewer_point_{0, 0};
 
     std::vector<shared_ptr<cv_wl_widget>> widgets_;
-    std::vector<cv::Point> widgets_points_;
+    std::vector<cv::Rect> widget_geometries_;
 
     cv_wl_mouse_callback on_mouse_;
 
@@ -1188,16 +1188,27 @@ void cv_wl_viewer::set_mouse_callback(CvMouseCallback callback, void *param)
     callback_ = callback;
 }
 
-int cv_wl_viewer::get_preferred_width() const
+void cv_wl_viewer::get_preferred_width(int& minimum, int& natural) const
 {
-    return image_.size().width;
+    if (image_.size().area() == 0) {
+        minimum = natural = 0;
+    } else {
+        natural = image_.size().width;
+        minimum = (flags_ & cv::WINDOW_AUTOSIZE ? natural : 0);
+    }
 }
 
-int cv_wl_viewer::get_preferred_height_for_width(int width) const
+void cv_wl_viewer::get_preferred_height_for_width(int width, int& minimum, int& natural) const
 {
-    /* Keep the aspect ratio */
-    return image_.size().area() == 0 ? 0
-        : (double)width * ((double)image_.size().height / (double)image_.size().width);
+    if (image_.size().area() == 0) {
+        minimum = natural = 0;
+    } else if (flags_ & cv::WINDOW_AUTOSIZE) {
+        assert(width == image_.size().width);
+        minimum = natural = image_.size().height;
+    } else {
+        natural = (double)width * ((double)image_.size().height / (double)image_.size().width);
+        minimum = (flags_ & CV_WINDOW_FREERATIO ? 0 : natural);
+    }
 }
 
 void cv_wl_viewer::on_mouse(int event, int x, int y, int flag)
@@ -1287,14 +1298,14 @@ void cv_wl_trackbar::set_max(int maxval)
     }
 }
 
-int cv_wl_trackbar::get_preferred_width() const
+void cv_wl_trackbar::get_preferred_width(int& minimum, int& natural) const
 {
-    return 320;  /* minimum and natural width */
+    minimum = natural =  320;
 }
 
-int cv_wl_trackbar::get_preferred_height_for_width(int width) const
+void cv_wl_trackbar::get_preferred_height_for_width(int width, int& minimum, int& natural) const
 {
-    return 40;  /* minimum and natural width */
+    minimum = natural = 40;
 }
 
 void cv_wl_trackbar::prepare_to_draw()
@@ -1380,7 +1391,7 @@ cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string
     wl_surface_set_user_data(surface_, this);
 
     viewer_ = std::make_shared<cv_wl_viewer>(this, flags);
-    viewer_point_ = cv::Point(0, 0);
+    widget_geometries_.emplace_back(0, 0, 0, 0);
 }
 
 cv_wl_window::~cv_wl_window()
@@ -1432,7 +1443,7 @@ void cv_wl_window::create_trackbar(std::string const& name, int *value, int coun
             this, name,value, count, on_change, userdata
         );
     widgets_.emplace_back(trackbar);
-    widgets_points_.emplace_back(0, 0);
+    widget_geometries_.emplace_back(0, 0, 0, 0);
 }
 
 weak_ptr<cv_wl_trackbar> cv_wl_window::get_trackbar(std::string const& trackbar_name) const
@@ -1457,72 +1468,114 @@ static void calculate_damage(cv::Rect& surface_damage, cv::Rect const& widget_da
     }
 }
 
-cv::Size cv_wl_window::calculate_window_size(cv::Size const& new_size)
+std::tuple<cv::Size, std::vector<cv::Rect>>
+cv_wl_window::manage_widget_geometry(cv::Size const& new_size)
 {
-    cv::Size size = new_size;
+    std::vector<cv::Rect> geometries;
+
+    std::vector<int> min_widths, nat_widths;
+    int min_width, nat_width, min_height, nat_height;
+
+    auto store_preferred_width = [&](shared_ptr<cv_wl_widget> const& widget) {
+        widget->get_preferred_width(min_width, nat_width);
+        min_widths.push_back(min_width);
+        nat_widths.push_back(nat_width);
+    };
+
+    store_preferred_width(viewer_);
+    for (auto& widget : widgets_)
+        store_preferred_width(widget);
+
+    int final_width = 0;
+    int total_height = 0;
+    std::function<void (shared_ptr<cv_wl_widget> const&, int, bool)> calc_geometries;
+
+    auto calc_autosize_geo = [&](shared_ptr<cv_wl_widget> const& widget, int width, bool) {
+        widget->get_preferred_height_for_width(width, min_height, nat_height);
+        geometries.emplace_back(0, total_height, width, nat_height);
+        total_height += nat_height;
+    };
+    auto calc_normal_geo = [&](shared_ptr<cv_wl_widget> const& widget, int width, bool viewer) {
+        widget->get_preferred_height_for_width(width, min_height, nat_height);
+        int height = viewer ? (new_size.height - total_height) : nat_height;
+        geometries.emplace_back(0, total_height, width, height);
+        total_height += height;
+    };
 
     if (viewer_->get_flags() & cv::WINDOW_AUTOSIZE) {
-        int total_height = 0;
-        int max_width = viewer_->get_preferred_width();
+        final_width = nat_widths[0];
+        calc_geometries = calc_autosize_geo;
+    } else {
+        int total_min_height = 0;
+        int max_min_width = *std::max_element(min_widths.begin(), min_widths.end());
+        auto calc_total_min_height = [&](shared_ptr<cv_wl_widget> const& widget) {
+            widget->get_preferred_height_for_width(max_min_width, min_height, nat_height);
+            total_min_height += min_height;
+        };
 
-        /* Ask each widget how long width do they need */
-        /* And fit with the longest width (mostly the viewer) */
+        calc_total_min_height(viewer_);
         for (auto& widget : widgets_)
-            max_width = std::max(max_width, widget->get_preferred_width());
+            calc_total_min_height(widget);
 
-        /* Ask each widget how long height do they need for the given width */
-        /* The total height becomes the actual height of the window */
-        for (auto& widget : widgets_)
-            total_height += widget->get_preferred_height_for_width(max_width);
-        total_height += viewer_->get_preferred_height_for_width(max_width);
-
-        size = cv::Size(max_width, total_height);
+        auto min_size = cv::Size(max_min_width, total_min_height);
+        if (new_size.width < min_size.width || new_size.height < min_size.height) {
+            /* The new_size is smaller than the minimum size */
+            return std::make_tuple(cv::Size(0, 0), geometries);
+        } else {
+            final_width = new_size.width;
+            calc_geometries = calc_normal_geo;
+        }
     }
 
-    return size;
+    for (auto& widget : widgets_)
+        calc_geometries(widget, final_width, false);
+    calc_geometries(viewer_, final_width, true);
+
+    return std::make_tuple(cv::Size(final_width, total_height), geometries);
 }
 
-void cv_wl_window::show(cv::Size const& new_size)
+void cv_wl_window::show(cv::Size const& size)
 {
     auto *buffer = this->next_buffer();
     if (!next_frame_ready_ || !buffer) {
-        pending_.repaint_request = true;
+        if (size.area() == 0) {
+            pending_.repaint_request = true;
+        } else {
+            pending_.size = size;
+            pending_.resize_request = true;
+        }
         return;
     }
 
-    /* The actual size of a surface */
-    auto next_size = this->calculate_window_size(new_size);
-    size_ = next_size.area() == 0 ? size_ : next_size;
+    auto placement =
+        this->manage_widget_geometry(size.area() == 0 ? size_ : size);
+    auto new_size = std::get<0>(placement);
+    auto const& geometries = std::get<1>(placement);
+    if (new_size.area() == 0 || geometries.size() != (widgets_.size() + 1))
+        return;
 
-    bool buffer_size_changed = (buffer->size() != size_);
+    bool buffer_size_changed = (buffer->size() != new_size);
     if (!buffer->is_allocated() || buffer_size_changed)
-        buffer->create_shm(display_->shm(), size_, WL_SHM_FORMAT_XRGB8888);
+        buffer->create_shm(display_->shm(), new_size, WL_SHM_FORMAT_XRGB8888);
 
-    int curr_height = 0;
-    auto surface_damage = cv::Rect(cv::Point(size_), cv::Size(0, 0));
-    for (size_t i = 0; i < widgets_.size(); ++i) {
-        int height = widgets_[i]->get_preferred_height_for_width(size_.width);
-        auto widget_damage = widgets_[i]->draw(
-            buffer->data() + (size_.width * curr_height * 4),
-            cv::Size(size_.width, height),
+    auto surface_damage = cv::Rect(cv::Point(new_size), cv::Size(0, 0));
+    auto draw_widget = [&](shared_ptr<cv_wl_widget> const& widget, cv::Rect const& rect) {
+        auto widget_damage = widget->draw(
+            buffer->data() + ((new_size.width * rect.y + rect.x) * 4),
+            rect.size(),
             buffer_size_changed
         );
+        calculate_damage(surface_damage, widget_damage, rect.y);
+    };
 
-        calculate_damage(surface_damage, widget_damage, curr_height);
-
-        widgets_points_[i] = cv::Point(0, curr_height);
-        curr_height += height;
-    }
-
-    auto viewer_damage = viewer_->draw(
-        buffer->data() + (size_.width * curr_height * 4),
-        cv::Size(size_.width, size_.height - curr_height),
-        buffer_size_changed
-    );
-    calculate_damage(surface_damage, viewer_damage, curr_height);
-    viewer_point_ = cv::Point(0, curr_height);
+    for (size_t i = 0; i < widgets_.size(); ++i)
+        draw_widget(widgets_[i], geometries[i]);
+    draw_widget(viewer_, geometries.back());
 
     this->commit_buffer(buffer, surface_damage);
+
+    widget_geometries_ = std::move(geometries);
+    size_ = new_size;
 }
 
 void cv_wl_window::commit_buffer(cv_wl_buffer *buffer, cv::Rect const& damage)
@@ -1630,11 +1683,12 @@ void cv_wl_window::mouse_enter(int x, int y, uint32_t serial)
 
     for (size_t i = 0; i < widgets_.size(); ++i) {
         auto size = widgets_[i]->get_last_size();
-        auto&& p = widgets_points_[i];
+        auto&& p = POINT_FROM_RECT(widget_geometries_[i]);
         if (p.y <= y && y <= p.y + size.height)
             widgets_[i]->on_mouse(cv::EVENT_MOUSEMOVE, x, y - p.y, 0);
     }
 
+    auto viewer_point_ = POINT_FROM_RECT(widget_geometries_.back());
     if (viewer_ && viewer_point_.y <= y)
         viewer_->on_mouse(cv::EVENT_MOUSEMOVE, x, y - viewer_point_.y, 0);
 }
@@ -1670,11 +1724,12 @@ void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
 
     for (size_t i = 0; i < widgets_.size(); ++i) {
         auto size = widgets_[i]->get_last_size();
-        auto&& p = widgets_points_[i];
+        auto&& p = POINT_FROM_RECT(widget_geometries_[i]);
         if (p.y <= y && y <= p.y + size.height)
             widgets_[i]->on_mouse(cv::EVENT_MOUSEMOVE, x, y - p.y, flag);
     }
 
+    auto viewer_point_ = POINT_FROM_RECT(widget_geometries_.back());
     if (viewer_ && viewer_point_.y <= y)
         viewer_->on_mouse(cv::EVENT_MOUSEMOVE, x, y - viewer_point_.y, flag);
 }
@@ -1720,11 +1775,12 @@ void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_butto
 
     for (size_t i = 0; i < widgets_.size(); ++i) {
         auto size = widgets_[i]->get_last_size();
-        auto const& p = widgets_points_[i];
+        auto&& p = POINT_FROM_RECT(widget_geometries_[i]);
         if (p.y <= on_mouse_.last_y && on_mouse_.last_y <= p.y + size.height)
             widgets_[i]->on_mouse(event, on_mouse_.last_x, on_mouse_.last_y - p.y, flag);
     }
 
+    auto viewer_point_ = POINT_FROM_RECT(widget_geometries_.back());
     if (viewer_ && viewer_point_.y <= on_mouse_.last_y)
         viewer_->on_mouse(event, on_mouse_.last_x, on_mouse_.last_y - viewer_point_.y, flag);
 }
