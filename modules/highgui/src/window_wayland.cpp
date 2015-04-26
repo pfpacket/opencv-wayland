@@ -492,6 +492,7 @@ public:
 
     cv::Size get_size() const;
     std::string const& name() const;
+    void set_title(std::string const& title);
 
     void show_image(cv::Mat const& image);
 
@@ -1408,6 +1409,11 @@ std::string const& cv_wl_window::name() const
     return name_;
 }
 
+void cv_wl_window::set_title(std::string const& title)
+{
+    xdg_surface_set_title(shell_surface_, title.c_str());
+}
+
 cv_wl_buffer* cv_wl_window::next_buffer()
 {
     cv_wl_buffer *buffer;
@@ -1968,7 +1974,6 @@ CV_IMPL void cvResizeWindow(const char* name, int width, int height)
 
     auto window = cv_core->get_window(name);
     window->show(cv::Size(width, height));
-
 }
 
 CV_IMPL int cvCreateTrackbar(const char* name_bar, const char* window_name, int* value, int count, CvTrackbarCallback on_change)
@@ -2048,6 +2053,14 @@ CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
     cv::Mat mat = cv::cvarrToMat(arr, true);
     window->show_image(mat);
     window->show();
+}
+
+void cv::setWindowTitle(const String& winname, const String& title)
+{
+    cvInitSystem(0, NULL);
+
+    auto window = cv_core->get_window(winname);
+    window->set_title(title);
 }
 
 CV_IMPL int cvWaitKey(int delay)
