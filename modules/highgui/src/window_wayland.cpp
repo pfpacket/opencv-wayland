@@ -66,8 +66,6 @@ namespace ch = std::chrono;
 
 extern shared_ptr<cv_wl_core> cv_core;
 
-#define POINT_FROM_RECT(rect) (cv::Point((rect.x), (rect.y)))
-
 #define throw_system_error(errmsg, errnum) \
     CV_Error_(StsInternal, ("%s: %s", errmsg, strerror(errnum)));
 
@@ -504,7 +502,12 @@ public:
     void mouse_motion(uint32_t time, int x, int y);
     void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state, uint32_t serial);
 
+    void update_cursor(int x, int y, bool grab = false);
+    void interactive_move();
     void set_mouse_callback(CvMouseCallback on_mouse, void *param);
+
+    void set_minimized();
+    void set_maximized(bool maximize = true);
 
     std::tuple<cv::Size, std::vector<cv::Rect>> manage_widget_geometry(cv::Size const& new_size);
     void show(cv::Size const& new_size = cv::Size(0, 0));
@@ -529,6 +532,10 @@ private:
     };
 
     struct {
+        bool maximized = false;
+    } state_;
+
+    struct {
         bool repaint_request = false;  /* we need to redraw as soon as possible (some states are changed) */
         bool resize_request = false;
         cv::Size size{0, 0};
@@ -542,17 +549,107 @@ private:
     cv_wl_mouse_callback on_mouse_;
 
     uint32_t mouse_enter_serial_;
+    uint32_t mouse_button_serial_;
     struct {
         std::string current_name;
         cv_wl_cursor_theme theme;
     } cursor_;
 
     cv_wl_buffer* next_buffer();
-    void update_cursor(int x, int y, uint32_t serial);
     void commit_buffer(cv_wl_buffer *buffer, cv::Rect const&);
     static void handle_surface_configure(void *, struct xdg_surface *, int32_t, int32_t, struct wl_array *, uint32_t);
     static void handle_surface_close(void *data, struct xdg_surface *xdg_surface);
     static void handle_frame_callback(void *data, struct wl_callback *cb, uint32_t time);
+};
+
+/* Window title bar with max,min,close buttons also to resize */
+class cv_wl_titlebar : public cv_wl_widget {
+public:
+    enum {
+        btn_width = 24,
+        btn_margin = 5,
+        btn_max_x = 8,
+        btn_max_y = 8,
+        titlebar_min_width = btn_width * 3 + btn_margin,
+        titlebar_min_height = 24
+    };
+
+    cv_wl_titlebar(cv_wl_window *window) : cv_wl_widget(window)
+    {
+    }
+
+    void get_preferred_width(int& minimum, int& natural) const override
+    {
+        minimum = natural = titlebar_min_width;
+    }
+
+    void get_preferred_height_for_width(int width, int& minimum, int& natural) const override
+    {
+        minimum = natural = titlebar_min_height;
+    }
+
+    void on_mouse(int event, int x, int y, int flag) override
+    {
+        auto p = cv::Point(x, y);
+        switch (event) {
+        case cv::EVENT_LBUTTONDOWN:
+            if (0 <= x && x < (last_size_.width - titlebar_min_width)) {
+                window_->update_cursor(x, y, true);
+                window_->interactive_move();
+            } else if (btn_close_.contains(p)) {
+                exit(EXIT_SUCCESS);
+            } else if (btn_max_.contains(p)) {
+                state_.maximized = !state_.maximized;
+                window_->set_maximized(state_.maximized);
+            } else if (btn_min_.contains(p)) {
+                window_->set_minimized();
+            }
+        }
+    }
+
+    void calc_button_geometry(cv::Size const& size)
+    {
+        /* Basic button geoemetries */
+        cv::Size btn_size = cv::Size(btn_width, size.height);
+        btn_close_ = cv::Rect(cv::Point(size.width - 5 - btn_size.width, 0), btn_size);
+        btn_max_ = cv::Rect(cv::Point(btn_close_.x - btn_size.width, 0), btn_size);
+        btn_min_ = cv::Rect(cv::Point(btn_max_.x - btn_size.width, 0), btn_size);
+    }
+
+    cv::Rect draw(void *data, cv::Size const& size, bool force) override
+    {
+        if (force || last_size_ != size) {
+            buf_ = cv::Mat(size, CV_8UC3, bg_color_);
+            this->calc_button_geometry(size);
+
+            auto const margin = cv::Point(btn_max_x, btn_max_y);
+            auto const btn_cls = cv::Rect(btn_close_.tl() + margin, btn_close_.br() - margin);
+            auto const btn_max = cv::Rect(btn_max_.tl() + margin, btn_max_.br() - margin);
+
+            cv::line(buf_, btn_cls.tl(), btn_cls.br(), line_color_, 1, CV_AA);
+            cv::line(buf_, btn_cls.tl() + cv::Point(btn_cls.width, 0), btn_cls.br() - cv::Point(btn_cls.width, 0), line_color_, 1, CV_AA);
+            cv::rectangle(buf_, btn_max.tl(), btn_max.br(), line_color_, 1, CV_AA);
+            cv::line(buf_, cv::Point(btn_min_.x + 8, btn_min_.height / 2), cv::Point(btn_min_.x + btn_min_.width - 8, btn_min_.height / 2), line_color_, 1, CV_AA);
+
+            cv::line(buf_, cv::Point(0, 0), cv::Point(buf_.size().width, 0), border_color_, 2, CV_AA);
+
+            write_mat_to_xrgb8888(buf_, data);
+            last_size_ = size;
+        }
+
+        return cv::Rect(cv::Point(0, 0), size);
+    }
+
+private:
+    struct {
+        bool maximized = false;
+    } state_;
+
+    cv::Mat buf_;
+    cv::Rect btn_close_, btn_max_, btn_min_;
+    cv::Scalar const line_color_ = CV_RGB(0xff, 0xff, 0xff);
+    cv::Scalar const bg_color_ = CV_RGB(0x2d, 0x2d, 0x2d);
+    cv::Scalar const border_color_ = CV_RGB(0x53, 0x63, 0x53);
 };
 
 class cv_wl_core {
@@ -1355,6 +1452,7 @@ void cv_wl_trackbar::on_mouse(int event, int x, int y, int flag)
     switch (event) {
     case cv::EVENT_LBUTTONDOWN:
         slider_.drag = true;
+        window_->update_cursor(x, y, true);
         break;
     case cv::EVENT_MOUSEMOVE:
         if (!(flag & cv::EVENT_FLAG_LBUTTON))
@@ -1386,6 +1484,9 @@ cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string
     xdg_surface_set_title(shell_surface_, title_.c_str());
 
     wl_surface_set_user_data(surface_, this);
+
+    widgets_.push_back(std::make_shared<cv_wl_titlebar>(this));
+    widget_geometries_.emplace_back(0, 0, 0, 0);
 
     viewer_ = std::make_shared<cv_wl_viewer>(this, flags);
     widget_geometries_.emplace_back(0, 0, 0, 0);
@@ -1432,6 +1533,19 @@ cv_wl_buffer* cv_wl_window::next_buffer()
 void cv_wl_window::set_mouse_callback(CvMouseCallback on_mouse, void *param)
 {
     viewer_->set_mouse_callback(on_mouse, param);
+}
+
+void cv_wl_window::set_minimized()
+{
+    xdg_surface_set_minimized(shell_surface_);
+}
+
+void cv_wl_window::set_maximized(bool maximize)
+{
+    if (maximize)
+        xdg_surface_set_maximized(shell_surface_);
+    else
+        xdg_surface_unset_maximized(shell_surface_);
 }
 
 void cv_wl_window::show_image(cv::Mat const& image)
@@ -1614,11 +1728,11 @@ void cv_wl_window::handle_frame_callback(void *data, struct wl_callback *cb, uin
     }
 }
 
-static std::string get_cursor_name(int x, int y, cv::Size const& size, bool drag = false)
+static std::string get_cursor_name(int x, int y, cv::Size const& size, bool grab)
 {
     std::string cursor;
 
-    if (drag) {
+    if (grab) {
         cursor = "grabbing";
     } else if (0 <= y && y <= 10) {
         cursor = "top_";
@@ -1661,9 +1775,9 @@ static xdg_surface_resize_edge cursor_name_to_enum(std::string const& cursor)
     else return XDG_SURFACE_RESIZE_EDGE_NONE;
 }
 
-void cv_wl_window::update_cursor(int x, int y, uint32_t serial)
+void cv_wl_window::update_cursor(int x, int y, bool grab)
 {
-    auto cursor_name = get_cursor_name(x, y, size_, on_mouse_.drag);
+    auto cursor_name = get_cursor_name(x, y, size_, grab);
     if (cursor_.current_name == cursor_name)
         return;
 
@@ -1676,24 +1790,33 @@ void cv_wl_window::update_cursor(int x, int y, uint32_t serial)
     cursor.lock()->commit();
 }
 
+void cv_wl_window::interactive_move()
+{
+    xdg_surface_move(
+        shell_surface_,
+        display_->input().lock()->seat(),
+        mouse_button_serial_
+    );
+}
+
 void cv_wl_window::mouse_enter(int x, int y, uint32_t serial)
 {
+    auto p = cv::Point(x, y);
     on_mouse_.last_x = x;
     on_mouse_.last_y = y;
     mouse_enter_serial_ = serial;
 
-    this->update_cursor(x, y, mouse_enter_serial_);
+    this->update_cursor(x, y);
 
     for (size_t i = 0; i < widgets_.size(); ++i) {
-        auto size = widgets_[i]->get_last_size();
-        auto&& p = POINT_FROM_RECT(widget_geometries_[i]);
-        if (p.y <= y && y <= p.y + size.height)
-            widgets_[i]->on_mouse(cv::EVENT_MOUSEMOVE, x, y - p.y, 0);
+        auto const& rect = widget_geometries_[i];
+        if (rect.contains(p))
+            widgets_[i]->on_mouse(cv::EVENT_MOUSEMOVE, x - rect.x, y - rect.y, 0);
     }
 
-    auto viewer_point_ = POINT_FROM_RECT(widget_geometries_.back());
-    if (viewer_ && viewer_point_.y <= y)
-        viewer_->on_mouse(cv::EVENT_MOUSEMOVE, x, y - viewer_point_.y, 0);
+    auto const& rect = widget_geometries_.back();
+    if (viewer_ && rect.contains(p))
+        viewer_->on_mouse(cv::EVENT_MOUSEMOVE, x - rect.x, y - rect.y, 0);
 }
 
 void cv_wl_window::mouse_leave()
@@ -1704,10 +1827,9 @@ void cv_wl_window::mouse_leave()
 void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
 {
     int flag = 0;
+    auto p = cv::Point(x, y);
     on_mouse_.last_x = x;
     on_mouse_.last_y = y;
-
-    this->update_cursor(x, y, mouse_enter_serial_);
 
     if (on_mouse_.drag) {
         switch (on_mouse_.button) {
@@ -1725,21 +1847,27 @@ void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
         }
     }
 
+    bool grabbing =
+        (cursor_.current_name == "grabbing" && (flag & cv::EVENT_FLAG_LBUTTON));
+    this->update_cursor(x, y, grabbing);
+
     for (size_t i = 0; i < widgets_.size(); ++i) {
-        auto size = widgets_[i]->get_last_size();
-        auto&& p = POINT_FROM_RECT(widget_geometries_[i]);
-        if (p.y <= y && y <= p.y + size.height)
-            widgets_[i]->on_mouse(cv::EVENT_MOUSEMOVE, x, y - p.y, flag);
+        auto const& rect = widget_geometries_[i];
+        if (rect.contains(p))
+            widgets_[i]->on_mouse(cv::EVENT_MOUSEMOVE, x - rect.x, y - rect.y, flag);
     }
 
-    auto viewer_point_ = POINT_FROM_RECT(widget_geometries_.back());
-    if (viewer_ && viewer_point_.y <= y)
-        viewer_->on_mouse(cv::EVENT_MOUSEMOVE, x, y - viewer_point_.y, flag);
+    auto const& rect = widget_geometries_.back();
+    if (viewer_ && rect.contains(p))
+        viewer_->on_mouse(cv::EVENT_MOUSEMOVE, x - rect.x, y - rect.y, flag);
 }
 
 void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state, uint32_t serial)
 {
     int event = 0, flag = 0;
+    auto p = cv::Point(on_mouse_.last_x, on_mouse_.last_y);
+
+    mouse_button_serial_ = serial;
 
     /* Start a user-driven, interactive resize of the surface */
     if (WL_POINTER_BUTTON_STATE_PRESSED && !on_mouse_.drag &&
@@ -1757,7 +1885,7 @@ void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_butto
     on_mouse_.button = static_cast<cv_wl_mouse::button>(button);
     on_mouse_.drag = (state == WL_POINTER_BUTTON_STATE_PRESSED);
 
-    this->update_cursor(on_mouse_.last_x, on_mouse_.last_y, mouse_enter_serial_);
+    this->update_cursor(on_mouse_.last_x, on_mouse_.last_y);
 
     switch (button) {
     case cv_wl_mouse::LBUTTON:
@@ -1777,15 +1905,14 @@ void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_butto
     }
 
     for (size_t i = 0; i < widgets_.size(); ++i) {
-        auto size = widgets_[i]->get_last_size();
-        auto&& p = POINT_FROM_RECT(widget_geometries_[i]);
-        if (p.y <= on_mouse_.last_y && on_mouse_.last_y <= p.y + size.height)
-            widgets_[i]->on_mouse(event, on_mouse_.last_x, on_mouse_.last_y - p.y, flag);
+        auto const& rect = widget_geometries_[i];
+        if (rect.contains(p))
+            widgets_[i]->on_mouse(event, p.x - rect.x, p.y - rect.y, flag);
     }
 
-    auto viewer_point_ = POINT_FROM_RECT(widget_geometries_.back());
-    if (viewer_ && viewer_point_.y <= on_mouse_.last_y)
-        viewer_->on_mouse(event, on_mouse_.last_x, on_mouse_.last_y - viewer_point_.y, flag);
+    auto const& rect = widget_geometries_.back();
+    if (viewer_ && rect.contains(p))
+        viewer_->on_mouse(event, p.x - rect.x, p.y - rect.y, flag);
 }
 
 void cv_wl_window::handle_surface_configure(
@@ -1796,21 +1923,20 @@ void cv_wl_window::handle_surface_configure(
     auto size = cv::Size(width, height);
     auto *window = reinterpret_cast<cv_wl_window *>(data);
 
+    window->state_.maximized = false;
+
     wl_array_for_each(p, states) {
         uint32_t state = *((uint32_t *)p);
         switch (state) {
         case XDG_SURFACE_STATE_MAXIMIZED:
+            window->state_.maximized = true;
             break;
         case XDG_SURFACE_STATE_FULLSCREEN:
+            window->show(size);
             break;
         case XDG_SURFACE_STATE_RESIZING:
             if (size.area() != 0) {
-                if (window->next_frame_ready_) {
-                    window->show(size);
-                } else {
-                    window->pending_.size = size;
-                    window->pending_.resize_request = true;
-                }
+                window->show(size);
             }
             break;
         case XDG_SURFACE_STATE_ACTIVATED:
