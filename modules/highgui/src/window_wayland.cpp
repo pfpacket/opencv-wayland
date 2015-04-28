@@ -477,6 +477,13 @@ struct cv_wl_mouse_callback {
     bool drag = false;
     int last_x = 0, last_y = 0;
     cv_wl_mouse::button button = cv_wl_mouse::button::NONE;
+
+    void reset()
+    {
+        drag = false;
+        last_x = last_y = 0;
+        button = cv_wl_mouse::button::NONE;
+    }
 };
 
 class cv_wl_window {
@@ -1822,6 +1829,7 @@ void cv_wl_window::mouse_enter(int x, int y, uint32_t serial)
 void cv_wl_window::mouse_leave()
 {
     cursor_.current_name.clear();
+    on_mouse_.reset();
 }
 
 void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
