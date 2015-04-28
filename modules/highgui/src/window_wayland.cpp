@@ -381,7 +381,7 @@ public:
     virtual void get_preferred_width(int& minimum, int& natural) const = 0;
     virtual void get_preferred_height_for_width(int width, int& minimum, int& natural) const = 0;
 
-    virtual void on_mouse(int event, int x, int y, int flag) {}
+    virtual void on_mouse(int event, cv::Point const& p, int flag) {}
 
     /* Return: The area widget rendered, if not rendered at all, set as width=height=0 */
     virtual cv::Rect draw(void *data, cv::Size const&, bool force) = 0;
@@ -405,7 +405,7 @@ public:
 
     void get_preferred_width(int& minimum, int& natural) const override;
     void get_preferred_height_for_width(int width, int& minimum, int& natural) const override;
-    void on_mouse(int event, int x, int y, int flag) override;
+    void on_mouse(int event, cv::Point const& p, int flag) override;
     cv::Rect draw(void *data, cv::Size const&, bool force) override;
 
 private:
@@ -429,7 +429,7 @@ public:
 
     void get_preferred_width(int& minimum, int& natural) const override;
     void get_preferred_height_for_width(int width, int& minimum, int& natural) const override;
-    void on_mouse(int event, int x, int y, int flag) override;
+    void on_mouse(int event, cv::Point const& p, int flag) override;
     cv::Rect draw(void *data, cv::Size const& size, bool force) override;
 
 private:
@@ -475,13 +475,13 @@ private:
 
 struct cv_wl_mouse_callback {
     bool drag = false;
-    int last_x = 0, last_y = 0;
+    cv::Point last{0, 0};
     cv_wl_mouse::button button = cv_wl_mouse::button::NONE;
 
     void reset()
     {
         drag = false;
-        last_x = last_y = 0;
+        last = cv::Point(0, 0);
         button = cv_wl_mouse::button::NONE;
     }
 };
@@ -504,12 +504,13 @@ public:
     void create_trackbar(std::string const& name, int *value, int count, CvTrackbarCallback2 on_change, void *userdata);
     weak_ptr<cv_wl_trackbar> get_trackbar(std::string const&) const;
 
-    void mouse_enter(int x, int y, uint32_t serial);
+    void deliver_mouse_event(int event, cv::Point const& p, int flag);
+    void mouse_enter(cv::Point const& p, uint32_t serial);
     void mouse_leave();
-    void mouse_motion(uint32_t time, int x, int y);
+    void mouse_motion(uint32_t time, cv::Point const& p);
     void mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state, uint32_t serial);
 
-    void update_cursor(int x, int y, bool grab = false);
+    void update_cursor(cv::Point const& p, bool grab = false);
     void interactive_move();
     void set_mouse_callback(CvMouseCallback on_mouse, void *param);
 
@@ -595,9 +596,8 @@ public:
         minimum = natural = titlebar_min_height;
     }
 
-    void on_mouse(int event, int x, int y, int flag) override
+    void on_mouse(int event, cv::Point const& p, int flag) override
     {
-        auto p = cv::Point(x, y);
         switch (event) {
         case cv::EVENT_LBUTTONDOWN:
             if (btn_close_.contains(p)) {
@@ -608,7 +608,7 @@ public:
             } else if (btn_min_.contains(p)) {
                 window_->set_minimized();
             } else {
-                window_->update_cursor(x, y, true);
+                window_->update_cursor(p, true);
                 window_->interactive_move();
             }
         }
@@ -873,7 +873,7 @@ void cv_wl_mouse::handle_pointer_enter(void *data, struct wl_pointer *pointer,
     auto *window = reinterpret_cast<cv_wl_window *>(wl_surface_get_user_data(surface));
 
     mouse->focus_window_ = window;
-    mouse->focus_window_->mouse_enter(x, y, serial);
+    mouse->focus_window_->mouse_enter(cv::Point(x, y), serial);
 }
 
 void cv_wl_mouse::handle_pointer_leave(void *data,
@@ -892,7 +892,7 @@ void cv_wl_mouse::handle_pointer_motion(void *data,
     int y = wl_fixed_to_int(sy);
     auto *mouse = reinterpret_cast<cv_wl_mouse *>(data);
 
-    mouse->focus_window_->mouse_motion(time, x, y);
+    mouse->focus_window_->mouse_motion(time, cv::Point(x, y));
 }
 
 void cv_wl_mouse::handle_pointer_button(void *data, struct wl_pointer *wl_pointer,
@@ -1314,7 +1314,7 @@ void cv_wl_viewer::get_preferred_height_for_width(int width, int& minimum, int& 
     }
 }
 
-void cv_wl_viewer::on_mouse(int event, int x, int y, int flag)
+void cv_wl_viewer::on_mouse(int event, cv::Point const& p, int flag)
 {
     // Make sure the first mouse event is delivered to clients
     static int last_event = ~event, last_flag = ~flag;
@@ -1332,8 +1332,8 @@ void cv_wl_viewer::on_mouse(int event, int x, int y, int flag)
             last_event_time = now;
 
             /* Scale the coordinate to match the client's image coordinate */
-            x = x * ((double)image_.size().width / last_size_.width);
-            y = y * ((double)image_.size().height / last_size_.height);
+            int x = p.x * ((double)image_.size().width / last_size_.width);
+            int y = p.y * ((double)image_.size().height / last_size_.height);
 
             callback_(event, x, y, flag, param_);
         }
@@ -1456,19 +1456,19 @@ cv::Rect cv_wl_trackbar::draw(void *data, cv::Size const& size, bool force)
     return damage;
 }
 
-void cv_wl_trackbar::on_mouse(int event, int x, int y, int flag)
+void cv_wl_trackbar::on_mouse(int event, cv::Point const& p, int flag)
 {
     switch (event) {
     case cv::EVENT_LBUTTONDOWN:
         slider_.drag = true;
-        window_->update_cursor(x, y, true);
+        window_->update_cursor(p, true);
         break;
     case cv::EVENT_MOUSEMOVE:
         if (!(flag & cv::EVENT_FLAG_LBUTTON))
             break;
     case cv::EVENT_LBUTTONUP:
-        if (slider_.drag && bar_.left.x <= x && x <= bar_.right.x) {
-            slider_.value = (double)(x - bar_.left.x) / bar_.length() * count_;
+        if (slider_.drag && bar_.left.x <= p.x && p.x <= bar_.right.x) {
+            slider_.value = (double)(p.x - bar_.left.x) / bar_.length() * count_;
             slider_moved_ = true;
             window_->show();
             slider_.drag = (event != cv::EVENT_LBUTTONUP);
@@ -1551,7 +1551,7 @@ void cv_wl_window::set_minimized()
 
 void cv_wl_window::set_maximized(bool maximize)
 {
-    if (maximize)
+    if (maximize && !(viewer_->get_flags() & cv::WINDOW_AUTOSIZE))
         xdg_surface_set_maximized(shell_surface_);
     else
         xdg_surface_unset_maximized(shell_surface_);
@@ -1784,9 +1784,9 @@ static xdg_surface_resize_edge cursor_name_to_enum(std::string const& cursor)
     else return XDG_SURFACE_RESIZE_EDGE_NONE;
 }
 
-void cv_wl_window::update_cursor(int x, int y, bool grab)
+void cv_wl_window::update_cursor(cv::Point const& p, bool grab)
 {
-    auto cursor_name = get_cursor_name(x, y, size_, grab);
+    auto cursor_name = get_cursor_name(p.x, p.y, size_, grab);
     if (cursor_.current_name == cursor_name)
         return;
 
@@ -1808,24 +1808,26 @@ void cv_wl_window::interactive_move()
     );
 }
 
-void cv_wl_window::mouse_enter(int x, int y, uint32_t serial)
+void cv_wl_window::deliver_mouse_event(int event, cv::Point const& p, int flag)
 {
-    auto p = cv::Point(x, y);
-    on_mouse_.last_x = x;
-    on_mouse_.last_y = y;
-    mouse_enter_serial_ = serial;
-
-    this->update_cursor(x, y);
-
     for (size_t i = 0; i < widgets_.size(); ++i) {
         auto const& rect = widget_geometries_[i];
         if (rect.contains(p))
-            widgets_[i]->on_mouse(cv::EVENT_MOUSEMOVE, x - rect.x, y - rect.y, 0);
+            widgets_[i]->on_mouse(event, p - rect.tl(), flag);
     }
 
     auto const& rect = widget_geometries_.back();
     if (viewer_ && rect.contains(p))
-        viewer_->on_mouse(cv::EVENT_MOUSEMOVE, x - rect.x, y - rect.y, 0);
+        viewer_->on_mouse(event, p - rect.tl(), flag);
+}
+
+void cv_wl_window::mouse_enter(cv::Point const& p, uint32_t serial)
+{
+    on_mouse_.last = p;
+    mouse_enter_serial_ = serial;
+
+    this->update_cursor(p);
+    this->deliver_mouse_event(cv::EVENT_MOUSEMOVE, p, 0);
 }
 
 void cv_wl_window::mouse_leave()
@@ -1834,12 +1836,10 @@ void cv_wl_window::mouse_leave()
     on_mouse_.reset();
 }
 
-void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
+void cv_wl_window::mouse_motion(uint32_t time, cv::Point const& p)
 {
     int flag = 0;
-    auto p = cv::Point(x, y);
-    on_mouse_.last_x = x;
-    on_mouse_.last_y = y;
+    on_mouse_.last = p;
 
     if (on_mouse_.drag) {
         switch (on_mouse_.button) {
@@ -1859,23 +1859,13 @@ void cv_wl_window::mouse_motion(uint32_t time, int x, int y)
 
     bool grabbing =
         (cursor_.current_name == "grabbing" && (flag & cv::EVENT_FLAG_LBUTTON));
-    this->update_cursor(x, y, grabbing);
-
-    for (size_t i = 0; i < widgets_.size(); ++i) {
-        auto const& rect = widget_geometries_[i];
-        if (rect.contains(p))
-            widgets_[i]->on_mouse(cv::EVENT_MOUSEMOVE, x - rect.x, y - rect.y, flag);
-    }
-
-    auto const& rect = widget_geometries_.back();
-    if (viewer_ && rect.contains(p))
-        viewer_->on_mouse(cv::EVENT_MOUSEMOVE, x - rect.x, y - rect.y, flag);
+    this->update_cursor(p, grabbing);
+    this->deliver_mouse_event(cv::EVENT_MOUSEMOVE, p, flag);
 }
 
 void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_button_state state, uint32_t serial)
 {
     int event = 0, flag = 0;
-    auto p = cv::Point(on_mouse_.last_x, on_mouse_.last_y);
 
     mouse_button_serial_ = serial;
 
@@ -1895,8 +1885,6 @@ void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_butto
     on_mouse_.button = static_cast<cv_wl_mouse::button>(button);
     on_mouse_.drag = (state == WL_POINTER_BUTTON_STATE_PRESSED);
 
-    this->update_cursor(on_mouse_.last_x, on_mouse_.last_y);
-
     switch (button) {
     case cv_wl_mouse::LBUTTON:
         event = on_mouse_.drag ? cv::EVENT_LBUTTONDOWN : cv::EVENT_LBUTTONUP;
@@ -1914,15 +1902,8 @@ void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_butto
         break;
     }
 
-    for (size_t i = 0; i < widgets_.size(); ++i) {
-        auto const& rect = widget_geometries_[i];
-        if (rect.contains(p))
-            widgets_[i]->on_mouse(event, p.x - rect.x, p.y - rect.y, flag);
-    }
-
-    auto const& rect = widget_geometries_.back();
-    if (viewer_ && rect.contains(p))
-        viewer_->on_mouse(event, p.x - rect.x, p.y - rect.y, flag);
+    this->update_cursor(on_mouse_.last);
+    this->deliver_mouse_event(event, on_mouse_.last, flag);
 }
 
 void cv_wl_window::handle_surface_configure(
