@@ -1737,31 +1737,32 @@ void cv_wl_window::handle_frame_callback(void *data, struct wl_callback *cb, uin
     }
 }
 
+#define EDGE_AREA_MARGIN 7
 static std::string get_cursor_name(int x, int y, cv::Size const& size, bool grab)
 {
     std::string cursor;
 
     if (grab) {
         cursor = "grabbing";
-    } else if (0 <= y && y <= 10) {
+    } else if (0 <= y && y <= EDGE_AREA_MARGIN) {
         cursor = "top_";
-        if (0 <= x && x <= 10)
+        if (0 <= x && x <= EDGE_AREA_MARGIN)
             cursor += "left_corner";
-        else if (size.width -10 <= x && x <= size.width)
+        else if (size.width - EDGE_AREA_MARGIN <= x && x <= size.width)
             cursor += "right_corner";
         else
             cursor += "side";
-    } else if (size.height - 10 <= y && y <= size.height) {
+    } else if (size.height - EDGE_AREA_MARGIN <= y && y <= size.height) {
         cursor = "bottom_";
-        if (0 <= x && x <= 10)
+        if (0 <= x && x <= EDGE_AREA_MARGIN)
             cursor += "left_corner";
-        else if (size.width - 10 <= x && x <= size.width)
+        else if (size.width - EDGE_AREA_MARGIN <= x && x <= size.width)
             cursor += "right_corner";
         else
             cursor += "side";
-    } else if (0 <= x && x <= 10) {
+    } else if (0 <= x && x <= EDGE_AREA_MARGIN) {
         cursor = "left_side";
-    } else if (size.width - 10 <= x && x <= size.width) {
+    } else if (size.width - EDGE_AREA_MARGIN <= x && x <= size.width) {
         cursor = "right_side";
     } else {
         cursor = "left_ptr";
