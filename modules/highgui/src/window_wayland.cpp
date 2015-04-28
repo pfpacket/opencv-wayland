@@ -1564,12 +1564,15 @@ void cv_wl_window::show_image(cv::Mat const& image)
 
 void cv_wl_window::create_trackbar(std::string const& name, int *value, int count, CvTrackbarCallback2 on_change, void *userdata)
 {
-    auto trackbar =
-        std::make_shared<cv_wl_trackbar>(
-            this, name,value, count, on_change, userdata
-        );
-    widgets_.emplace_back(trackbar);
-    widget_geometries_.emplace_back(0, 0, 0, 0);
+    auto exists = this->get_trackbar(name).lock();
+    if (!exists) {
+        auto trackbar =
+            std::make_shared<cv_wl_trackbar>(
+                this, name,value, count, on_change, userdata
+            );
+        widgets_.emplace_back(trackbar);
+        widget_geometries_.emplace_back(0, 0, 0, 0);
+    }
 }
 
 weak_ptr<cv_wl_trackbar> cv_wl_window::get_trackbar(std::string const& trackbar_name) const
@@ -1984,12 +1987,14 @@ std::vector<std::string> cv_wl_core::get_window_names() const
 
 shared_ptr<cv_wl_window> cv_wl_core::get_window(std::string const& name)
 {
-    return windows_.at(name);
+    return windows_.count(name) >= 1 ?
+        windows_.at(name) : std::shared_ptr<cv_wl_window>();
 }
 
 void *cv_wl_core::get_window_handle(std::string const& name)
 {
-    return get_window(name).get();
+    auto window = get_window(name);
+    return window ? get_window(name).get() : nullptr;
 }
 
 std::string const& cv_wl_core::get_window_name(void *handle)
@@ -2091,15 +2096,12 @@ CV_IMPL void cvResizeWindow(const char* name, int width, int height)
 {
     cvInitSystem(0, NULL);
 
-    auto window = cv_core->get_window(name);
-    window->show(cv::Size(width, height));
+    if (auto window = cv_core->get_window(name))
+        window->show(cv::Size(width, height));
 }
 
 CV_IMPL int cvCreateTrackbar(const char* name_bar, const char* window_name, int* value, int count, CvTrackbarCallback on_change)
 {
-    //auto window = cv_core->get_window(window_name);
-
-    //window->create_trackbar(name_bar, value, count, on_change, nullptr);
     return 0;
 }
 
@@ -2107,8 +2109,8 @@ CV_IMPL int cvCreateTrackbar2(const char* trackbar_name, const char* window_name
 {
     cvInitSystem(0, NULL);
 
-    auto window = cv_core->get_window(window_name);
-    window->create_trackbar(trackbar_name, val, count, on_notify, userdata);
+    if (auto window = cv_core->get_window(window_name))
+        window->create_trackbar(trackbar_name, val, count, on_notify, userdata);
 
     return 0;
 }
@@ -2117,11 +2119,11 @@ CV_IMPL int cvGetTrackbarPos(const char* trackbar_name, const char* window_name)
 {
     cvInitSystem(0, NULL);
 
-    auto window = cv_core->get_window(window_name);
-
-    auto trackbar_ptr = window->get_trackbar(trackbar_name);
-    if (auto trackbar = trackbar_ptr.lock())
-        return trackbar->get_pos();
+    if (auto window = cv_core->get_window(window_name)) {
+        auto trackbar_ptr = window->get_trackbar(trackbar_name);
+        if (auto trackbar = trackbar_ptr.lock())
+            return trackbar->get_pos();
+    }
 
     return -1;
 }
@@ -2130,43 +2132,41 @@ CV_IMPL void cvSetTrackbarPos(const char* trackbar_name, const char* window_name
 {
     cvInitSystem(0, NULL);
 
-    auto window = cv_core->get_window(window_name);
-
-    auto trackbar_ptr = window->get_trackbar(trackbar_name);
-    if (auto trackbar = trackbar_ptr.lock())
-        trackbar->set_pos(pos);
+    if (auto window = cv_core->get_window(window_name)) {
+        auto trackbar_ptr = window->get_trackbar(trackbar_name);
+        if (auto trackbar = trackbar_ptr.lock())
+            trackbar->set_pos(pos);
+    }
 }
 
 CV_IMPL void cvSetTrackbarMax(const char* trackbar_name, const char* window_name, int maxval)
 {
     cvInitSystem(0, NULL);
 
-    auto window = cv_core->get_window(window_name);
-
-    auto trackbar_ptr = window->get_trackbar(trackbar_name);
-    if (auto trackbar = trackbar_ptr.lock())
-        trackbar->set_max(maxval);
+    if (auto window = cv_core->get_window(window_name)) {
+        auto trackbar_ptr = window->get_trackbar(trackbar_name);
+        if (auto trackbar = trackbar_ptr.lock())
+            trackbar->set_max(maxval);
+    }
 }
 
 CV_IMPL void cvSetMouseCallback(const char* window_name, CvMouseCallback on_mouse, void* param)
 {
     cvInitSystem(0, NULL);
 
-    auto window = cv_core->get_window(window_name);
-
-    window->set_mouse_callback(on_mouse, param);
+    if (auto window = cv_core->get_window(window_name))
+        window->set_mouse_callback(on_mouse, param);
 }
 
 CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
 {
     cvInitSystem(0, NULL);
 
-    shared_ptr<cv_wl_window> window;
-    try {
-        window = cv_core->get_window(name);
-    } catch (std::out_of_range& e) {
+    auto window = cv_core->get_window(name);
+    if (!window) {
         cv_core->create_window(name, cv::WINDOW_AUTOSIZE);
-        window = cv_core->get_window(name);
+        if (!(window = cv_core->get_window(name)))
+            CV_Error_(StsNoMem, ("Failed to create window: %s", name));
     }
 
     cv::Mat mat = cv::cvarrToMat(arr, true);
@@ -2178,8 +2178,8 @@ void cv::setWindowTitle(const String& winname, const String& title)
 {
     cvInitSystem(0, NULL);
 
-    auto window = cv_core->get_window(winname);
-    window->set_title(title);
+    if (auto window = cv_core->get_window(winname))
+        window->set_title(title);
 }
 
 CV_IMPL int cvWaitKey(int delay)
