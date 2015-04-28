@@ -1,7 +1,7 @@
 /*
  * Wayland Backend
  * TODO:
- *  Support WINDOW_NORMAL in cv_wl_window and cv_wl_viewer
+ *  Support WINDOW_NORMAL|CV_WINDOW_KEEPRATIO in cv_wl_window and cv_wl_viewer
  *  Keyboard: handle modifiers
  */
 
@@ -224,7 +224,7 @@ private:
         &handle_pointer_motion, &handle_pointer_button,
         &handle_pointer_axis
     };
-    std::queue<cv_wl_window *> entered_window_;
+    cv_wl_window *focus_window_;
 
     static void handle_pointer_enter(void *data, struct wl_pointer *pointer, uint32_t serial, struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy);
     static void handle_pointer_leave(void *data, struct wl_pointer *pointer, uint32_t serial, struct wl_surface *surface);
@@ -600,16 +600,16 @@ public:
         auto p = cv::Point(x, y);
         switch (event) {
         case cv::EVENT_LBUTTONDOWN:
-            if (0 <= x && x < (last_size_.width - titlebar_min_width)) {
-                window_->update_cursor(x, y, true);
-                window_->interactive_move();
-            } else if (btn_close_.contains(p)) {
+            if (btn_close_.contains(p)) {
                 exit(EXIT_SUCCESS);
             } else if (btn_max_.contains(p)) {
                 state_.maximized = !state_.maximized;
                 window_->set_maximized(state_.maximized);
             } else if (btn_min_.contains(p)) {
                 window_->set_minimized();
+            } else {
+                window_->update_cursor(x, y, true);
+                window_->interactive_move();
             }
         }
     }
@@ -872,18 +872,17 @@ void cv_wl_mouse::handle_pointer_enter(void *data, struct wl_pointer *pointer,
     auto *mouse = reinterpret_cast<cv_wl_mouse *>(data);
     auto *window = reinterpret_cast<cv_wl_window *>(wl_surface_get_user_data(surface));
 
-    mouse->entered_window_.push(window);
-    window->mouse_enter(x, y, serial);
+    mouse->focus_window_ = window;
+    mouse->focus_window_->mouse_enter(x, y, serial);
 }
 
 void cv_wl_mouse::handle_pointer_leave(void *data,
     struct wl_pointer *pointer, uint32_t serial, struct wl_surface *surface)
 {
     auto *mouse = reinterpret_cast<cv_wl_mouse *>(data);
-    auto *window = reinterpret_cast<cv_wl_window *>(wl_surface_get_user_data(surface));
 
-    window->mouse_leave();
-    mouse->entered_window_.pop();
+    mouse->focus_window_->mouse_leave();
+    mouse->focus_window_ = nullptr;
 }
 
 void cv_wl_mouse::handle_pointer_motion(void *data,
@@ -892,23 +891,26 @@ void cv_wl_mouse::handle_pointer_motion(void *data,
     int x = wl_fixed_to_int(sx);
     int y = wl_fixed_to_int(sy);
     auto *mouse = reinterpret_cast<cv_wl_mouse *>(data);
-    auto *window = mouse->entered_window_.front();
 
-    window->mouse_motion(time, x, y);
+    mouse->focus_window_->mouse_motion(time, x, y);
 }
 
 void cv_wl_mouse::handle_pointer_button(void *data, struct wl_pointer *wl_pointer,
     uint32_t serial, uint32_t time, uint32_t button, uint32_t state)
 {
     auto *mouse = reinterpret_cast<cv_wl_mouse *>(data);
-    auto *window = mouse->entered_window_.front();
 
-    window->mouse_button(time, button, static_cast<wl_pointer_button_state>(state), serial);
+    mouse->focus_window_->mouse_button(
+        time, button,
+        static_cast<wl_pointer_button_state>(state),
+        serial
+    );
 }
 
 void cv_wl_mouse::handle_pointer_axis(void *data, struct wl_pointer *wl_pointer,
     uint32_t time, uint32_t axis, wl_fixed_t value)
 {
+    /* TODO: Support scroll events */
 }
 
 
