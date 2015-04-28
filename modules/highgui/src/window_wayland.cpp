@@ -434,12 +434,15 @@ public:
 
 private:
     std::string name_;
-    int *value_, count_;
+    int count_;
     cv::Size size_;
 
     struct {
-        CvTrackbarCallback2 callback;
+        int *value;
         void *data;
+        CvTrackbarCallback2 callback;
+
+        void update(int v) { if (value) *value = v; }
         void call(int v) { if (callback) callback(v, data); }
     } on_change_;
 
@@ -1366,10 +1369,11 @@ cv::Rect cv_wl_viewer::draw(void *data, cv::Size const& size, bool force)
  */
 cv_wl_trackbar::cv_wl_trackbar(cv_wl_window *window, std::string const& name,
     int *value, int count, CvTrackbarCallback2 on_change, void *data)
-    :   cv_wl_widget(window), name_(name), value_(value), count_(count)
+    :   cv_wl_widget(window), name_(name), count_(count)
 {
-    on_change_.callback = on_change;
+    on_change_.value = value;
     on_change_.data = data;
+    on_change_.callback = on_change;
 }
 
 std::string const& cv_wl_trackbar::name() const
@@ -1427,6 +1431,11 @@ void cv_wl_trackbar::prepare_to_draw()
 cv::Rect cv_wl_trackbar::draw(void *data, cv::Size const& size, bool force)
 {
     auto damage = cv::Rect(0, 0, 0, 0);
+
+    if (slider_moved_) {
+        on_change_.update(slider_.value);
+        on_change_.call(slider_.value);
+    }
 
     if (slider_moved_ || force) {
         size_ = last_size_ = size;
