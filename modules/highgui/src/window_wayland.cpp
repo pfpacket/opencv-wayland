@@ -54,6 +54,7 @@ class cv_wl_buffer;
 class cv_wl_cursor;
 class cv_wl_cursor_theme;
 class cv_wl_widget;
+class cv_wl_titlebar;
 class cv_wl_viewer;
 class cv_wl_trackbar;
 class cv_wl_window;
@@ -391,6 +392,47 @@ protected:
     cv_wl_window *window_;
 };
 
+class cv_wl_titlebar : public cv_wl_widget {
+public:
+    enum {
+        btn_width = 24,
+        btn_margin = 5,
+        btn_max_x = 8,
+        btn_max_y = 8,
+        titlebar_min_width = btn_width * 3 + btn_margin,
+        titlebar_min_height = 24
+    };
+
+    cv_wl_titlebar(cv_wl_window *window);
+
+    void get_preferred_width(int& minimum, int& natural) const override;
+    void get_preferred_height_for_width(int width, int& minimum, int& natural) const override;
+    void on_mouse(int event, cv::Point const& p, int flag) override;
+
+    void calc_button_geometry(cv::Size const& size);
+    cv::Rect draw(void *data, cv::Size const& size, bool force) override;
+
+private:
+    struct {
+        bool maximized = false;
+    } state_;
+
+    cv::Mat buf_;
+    cv::Rect btn_close_, btn_max_, btn_min_;
+    cv::Scalar const line_color_ = CV_RGB(0xff, 0xff, 0xff);
+    cv::Scalar const bg_color_ = CV_RGB(0x2d, 0x2d, 0x2d);
+    cv::Scalar const border_color_ = CV_RGB(0x53, 0x63, 0x53);
+
+    std::string last_title_;
+
+    struct {
+        int face = cv::FONT_HERSHEY_TRIPLEX;
+        double scale = 0.4;
+        int thickness = 1;
+        int baseline = 0;
+    } title_;
+};
+
 class cv_wl_viewer : public cv_wl_widget {
 public:
     enum {
@@ -571,95 +613,6 @@ private:
     static void handle_surface_configure(void *, struct xdg_surface *, int32_t, int32_t, struct wl_array *, uint32_t);
     static void handle_surface_close(void *data, struct xdg_surface *xdg_surface);
     static void handle_frame_callback(void *data, struct wl_callback *cb, uint32_t time);
-};
-
-/* Window title bar with max,min,close buttons also to resize */
-class cv_wl_titlebar : public cv_wl_widget {
-public:
-    enum {
-        btn_width = 24,
-        btn_margin = 5,
-        btn_max_x = 8,
-        btn_max_y = 8,
-        titlebar_min_width = btn_width * 3 + btn_margin,
-        titlebar_min_height = 24
-    };
-
-    cv_wl_titlebar(cv_wl_window *window) : cv_wl_widget(window)
-    {
-    }
-
-    void get_preferred_width(int& minimum, int& natural) const override
-    {
-        minimum = natural = titlebar_min_width;
-    }
-
-    void get_preferred_height_for_width(int width, int& minimum, int& natural) const override
-    {
-        minimum = natural = titlebar_min_height;
-    }
-
-    void on_mouse(int event, cv::Point const& p, int flag) override
-    {
-        switch (event) {
-        case cv::EVENT_LBUTTONDOWN:
-            if (btn_close_.contains(p)) {
-                exit(EXIT_SUCCESS);
-            } else if (btn_max_.contains(p)) {
-                state_.maximized = !state_.maximized;
-                window_->set_maximized(state_.maximized);
-            } else if (btn_min_.contains(p)) {
-                window_->set_minimized();
-            } else {
-                window_->update_cursor(p, true);
-                window_->interactive_move();
-            }
-        }
-    }
-
-    void calc_button_geometry(cv::Size const& size)
-    {
-        /* Basic button geoemetries */
-        cv::Size btn_size = cv::Size(btn_width, size.height);
-        btn_close_ = cv::Rect(cv::Point(size.width - 5 - btn_size.width, 0), btn_size);
-        btn_max_ = cv::Rect(cv::Point(btn_close_.x - btn_size.width, 0), btn_size);
-        btn_min_ = cv::Rect(cv::Point(btn_max_.x - btn_size.width, 0), btn_size);
-    }
-
-    cv::Rect draw(void *data, cv::Size const& size, bool force) override
-    {
-        if (force || last_size_ != size) {
-            buf_ = cv::Mat(size, CV_8UC3, bg_color_);
-            this->calc_button_geometry(size);
-
-            auto const margin = cv::Point(btn_max_x, btn_max_y);
-            auto const btn_cls = cv::Rect(btn_close_.tl() + margin, btn_close_.br() - margin);
-            auto const btn_max = cv::Rect(btn_max_.tl() + margin, btn_max_.br() - margin);
-
-            cv::line(buf_, btn_cls.tl(), btn_cls.br(), line_color_, 1, CV_AA);
-            cv::line(buf_, btn_cls.tl() + cv::Point(btn_cls.width, 0), btn_cls.br() - cv::Point(btn_cls.width, 0), line_color_, 1, CV_AA);
-            cv::rectangle(buf_, btn_max.tl(), btn_max.br(), line_color_, 1, CV_AA);
-            cv::line(buf_, cv::Point(btn_min_.x + 8, btn_min_.height / 2), cv::Point(btn_min_.x + btn_min_.width - 8, btn_min_.height / 2), line_color_, 1, CV_AA);
-
-            cv::line(buf_, cv::Point(0, 0), cv::Point(buf_.size().width, 0), border_color_, 2, CV_AA);
-
-            write_mat_to_xrgb8888(buf_, data);
-            last_size_ = size;
-        }
-
-        return cv::Rect(cv::Point(0, 0), size);
-    }
-
-private:
-    struct {
-        bool maximized = false;
-    } state_;
-
-    cv::Mat buf_;
-    cv::Rect btn_close_, btn_max_, btn_min_;
-    cv::Scalar const line_color_ = CV_RGB(0xff, 0xff, 0xff);
-    cv::Scalar const bg_color_ = CV_RGB(0x2d, 0x2d, 0x2d);
-    cv::Scalar const border_color_ = CV_RGB(0x53, 0x63, 0x53);
 };
 
 class cv_wl_core {
@@ -1269,6 +1222,89 @@ weak_ptr<cv_wl_cursor> cv_wl_cursor_theme::get_cursor(std::string const& name)
 
 
 /*
+ * cv_wl_titlebar implementation
+ */
+cv_wl_titlebar::cv_wl_titlebar(cv_wl_window *window) : cv_wl_widget(window)
+{
+}
+
+void cv_wl_titlebar::get_preferred_width(int& minimum, int& natural) const
+{
+    minimum = natural = titlebar_min_width;
+}
+
+void cv_wl_titlebar::get_preferred_height_for_width(int width, int& minimum, int& natural) const
+{
+    minimum = natural = titlebar_min_height;
+}
+
+void cv_wl_titlebar::on_mouse(int event, cv::Point const& p, int flag)
+{
+    switch (event) {
+    case cv::EVENT_LBUTTONDOWN:
+        if (btn_close_.contains(p)) {
+            exit(EXIT_SUCCESS);
+        } else if (btn_max_.contains(p)) {
+            state_.maximized = !state_.maximized;
+            window_->set_maximized(state_.maximized);
+        } else if (btn_min_.contains(p)) {
+            window_->set_minimized();
+        } else {
+            window_->update_cursor(p, true);
+            window_->interactive_move();
+        }
+    }
+}
+
+void cv_wl_titlebar::calc_button_geometry(cv::Size const& size)
+{
+    /* Basic button geoemetries */
+    cv::Size btn_size = cv::Size(btn_width, size.height);
+    btn_close_ = cv::Rect(cv::Point(size.width - 5 - btn_size.width, 0), btn_size);
+    btn_max_ = cv::Rect(cv::Point(btn_close_.x - btn_size.width, 0), btn_size);
+    btn_min_ = cv::Rect(cv::Point(btn_max_.x - btn_size.width, 0), btn_size);
+}
+
+cv::Rect cv_wl_titlebar::draw(void *data, cv::Size const& size, bool force)
+{
+    if (force || last_size_ != size || last_title_ != window_->get_title()) {
+        buf_ = cv::Mat(size, CV_8UC3, bg_color_);
+        this->calc_button_geometry(size);
+
+        auto const margin = cv::Point(btn_max_x, btn_max_y);
+        auto const btn_cls = cv::Rect(btn_close_.tl() + margin, btn_close_.br() - margin);
+        auto const btn_max = cv::Rect(btn_max_.tl() + margin, btn_max_.br() - margin);
+        auto title_area = cv::Rect(0, 0, size.width - titlebar_min_width, size.height);
+
+        auto text = cv::getTextSize(window_->get_title(), title_.face, title_.scale, title_.thickness, &title_.baseline);
+        if (text.area() <= title_area.area()) {
+            auto origin = cv::Point(0, (size.height + text.height) / 2);
+            origin.x = ((title_area.width >= (size.width + text.width) / 2) ?
+                (size.width - text.width) / 2 : (title_area.width - text.width) / 2);
+            cv::putText(
+                buf_, window_->get_title(),
+                origin, title_.face, title_.scale,
+                CV_RGB(0xff, 0xff, 0xff), title_.thickness, CV_AA
+            );
+        }
+
+        buf_(cv::Rect(btn_min_.tl(), cv::Size(titlebar_min_width, size.height))) = bg_color_;
+        cv::line(buf_, btn_cls.tl(), btn_cls.br(), line_color_, 1, CV_AA);
+        cv::line(buf_, btn_cls.tl() + cv::Point(btn_cls.width, 0), btn_cls.br() - cv::Point(btn_cls.width, 0), line_color_, 1, CV_AA);
+        cv::rectangle(buf_, btn_max.tl(), btn_max.br(), line_color_, 1, CV_AA);
+        cv::line(buf_, cv::Point(btn_min_.x + 8, btn_min_.height / 2), cv::Point(btn_min_.x + btn_min_.width - 8, btn_min_.height / 2), line_color_, 1, CV_AA);
+        cv::line(buf_, cv::Point(0, 0), cv::Point(buf_.size().width, 0), border_color_, 1, CV_AA);
+
+        write_mat_to_xrgb8888(buf_, data);
+        last_size_ = size;
+        last_title_ = window_->get_title();
+    }
+
+    return cv::Rect(cv::Point(0, 0), size);
+}
+
+
+/*
  * cv_wl_viewer implementation
  */
 cv_wl_viewer::cv_wl_viewer(cv_wl_window *window, int flags)
@@ -1448,7 +1484,7 @@ cv::Rect cv_wl_trackbar::draw(void *data, cv::Size const& size, bool force)
         this->prepare_to_draw();
         cv::putText(
             data_,
-            (name_ + ": " + std::to_string(slider_.value)).c_str(),
+            (name_ + ": " + std::to_string(slider_.value)),
             bar_.text_orig, bar_.fontface, bar_.fontscale,
             CV_RGB(0x00, 0x00, 0x00), bar_.font_thickness, CV_AA);
 
@@ -1569,6 +1605,7 @@ void cv_wl_window::set_maximized(bool maximize)
 void cv_wl_window::show_image(cv::Mat const& image)
 {
     viewer_->set_image(image);
+    this->show();
 }
 
 void cv_wl_window::create_trackbar(std::string const& name, int *value, int count, CvTrackbarCallback2 on_change, void *userdata)
@@ -2180,7 +2217,6 @@ CV_IMPL void cvShowImage(const char* name, const CvArr* arr)
 
     cv::Mat mat = cv::cvarrToMat(arr, true);
     window->show_image(mat);
-    window->show();
 }
 
 void cv::setWindowTitle(const String& winname, const String& title)
