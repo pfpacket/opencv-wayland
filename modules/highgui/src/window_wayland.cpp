@@ -1930,9 +1930,9 @@ void cv_wl_window::handle_surface_configure(
         switch (state) {
         case XDG_SURFACE_STATE_MAXIMIZED:
             window->state_.maximized = true;
+            window->show(size);
             break;
         case XDG_SURFACE_STATE_FULLSCREEN:
-            window->show(size);
             break;
         case XDG_SURFACE_STATE_RESIZING:
             if (size.area() != 0) {
