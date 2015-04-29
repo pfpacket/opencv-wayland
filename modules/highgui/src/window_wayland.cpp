@@ -1981,6 +1981,7 @@ void cv_wl_window::handle_surface_configure(
     auto *window = reinterpret_cast<cv_wl_window *>(data);
 
     window->state_.maximized = false;
+    xdg_surface_ack_configure(surface, serial);
 
     wl_array_for_each(p, states) {
         uint32_t state = *((uint32_t *)p);
@@ -2003,8 +2004,6 @@ void cv_wl_window::handle_surface_configure(
             break;
         }
     }
-
-    xdg_surface_ack_configure(surface, serial);
 }
 
 void cv_wl_window::handle_surface_close(void *data, struct xdg_surface *surface)
