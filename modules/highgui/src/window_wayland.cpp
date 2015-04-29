@@ -1267,6 +1267,8 @@ void cv_wl_titlebar::calc_button_geometry(cv::Size const& size)
 
 cv::Rect cv_wl_titlebar::draw(void *data, cv::Size const& size, bool force)
 {
+    auto damage = cv::Rect(0, 0, 0, 0);
+
     if (force || last_size_ != size || last_title_ != window_->get_title()) {
         buf_ = cv::Mat(size, CV_8UC3, bg_color_);
         this->calc_button_geometry(size);
@@ -1298,9 +1300,10 @@ cv::Rect cv_wl_titlebar::draw(void *data, cv::Size const& size, bool force)
         write_mat_to_xrgb8888(buf_, data);
         last_size_ = size;
         last_title_ = window_->get_title();
+        damage = cv::Rect(cv::Point(0, 0), size);
     }
 
-    return cv::Rect(cv::Point(0, 0), size);
+    return damage;
 }
 
 
@@ -1633,13 +1636,26 @@ weak_ptr<cv_wl_trackbar> cv_wl_window::get_trackbar(std::string const& trackbar_
         : std::static_pointer_cast<cv_wl_trackbar>(*it);
 }
 
-static void calculate_damage(cv::Rect& surface_damage, cv::Rect const& widget_damage, int curr_height = 0)
+static void calculate_damage(cv::Rect& surface_damage,
+    cv::Rect const& widget_geometry, cv::Rect const& w_damage)
 {
-    if (widget_damage.area() != 0) {
-        surface_damage.x = std::min(surface_damage.x, widget_damage.x);
-        surface_damage.y = std::min(surface_damage.y, curr_height + widget_damage.y);
-        surface_damage.width = std::max(surface_damage.width, widget_damage.x + widget_damage.width - surface_damage.x);
-        surface_damage.height = std::max(surface_damage.height, curr_height + widget_damage.y + widget_damage.height - surface_damage.y);
+    if (w_damage.area() == 0)
+        return;
+
+    auto widget_damage = w_damage;
+    widget_damage.x += widget_geometry.x;
+    widget_damage.y += widget_geometry.y;
+
+    if (surface_damage.area() == 0) {
+        surface_damage = widget_damage;
+    } else {
+        auto damage = cv::Rect(0, 0, 0, 0);
+        damage.x = std::min(surface_damage.x, widget_damage.x);
+        damage.y = std::min(surface_damage.y, widget_damage.y);
+        damage.width = std::max(surface_damage.x + surface_damage.width, widget_damage.x + widget_damage.width) - damage.x;
+        damage.height = std::max(surface_damage.y + surface_damage.height, widget_damage.y + widget_damage.height) - damage.y;
+
+        surface_damage = damage;
     }
 }
 
@@ -1733,14 +1749,14 @@ void cv_wl_window::show(cv::Size const& size)
     if (!buffer->is_allocated() || buffer_size_changed)
         buffer->create_shm(display_->shm(), new_size, WL_SHM_FORMAT_XRGB8888);
 
-    auto surface_damage = cv::Rect(cv::Point(new_size), cv::Size(0, 0));
+    auto surface_damage = cv::Rect(0, 0, 0, 0);
     auto draw_widget = [&](shared_ptr<cv_wl_widget> const& widget, cv::Rect const& rect) {
         auto widget_damage = widget->draw(
             buffer->data() + ((new_size.width * rect.y + rect.x) * 4),
             rect.size(),
             buffer_size_changed
         );
-        calculate_damage(surface_damage, widget_damage, rect.y);
+        calculate_damage(surface_damage, rect, widget_damage);
     };
 
     for (size_t i = 0; i < widgets_.size(); ++i)
