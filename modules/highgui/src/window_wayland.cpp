@@ -2,7 +2,6 @@
  * Wayland Backend
  * TODO:
  *  Support WINDOW_NORMAL|CV_WINDOW_KEEPRATIO in cv_wl_window and cv_wl_viewer
- *  Keyboard: handle modifiers
  */
 
 #include "precomp.hpp"
@@ -40,8 +39,6 @@
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
-
-#define BACKEND_NAME "OpenCV Wayland"
 
 /*                              */
 /*  OpenCV highgui internals    */
@@ -236,9 +233,16 @@ private:
 
 class cv_wl_keyboard {
 public:
+    enum {
+        MOD_SHIFT_MASK      = 0x01,
+        MOD_ALT_MASK        = 0x02,
+        MOD_CONTROL_MASK    = 0x04
+    };
+
     cv_wl_keyboard(struct wl_keyboard *keyboard);
     ~cv_wl_keyboard();
 
+    uint32_t get_modifiers() const;
     std::queue<int> get_key_queue();
 
 private:
@@ -255,6 +259,7 @@ private:
         &handle_kb_keymap, &handle_kb_enter, &handle_kb_leave,
         &handle_kb_key, &handle_kb_modifiers, &handle_kb_repeat
     };
+    uint32_t modifiers_;
     std::queue<int> key_queue_;
 
     static void handle_kb_keymap(void *data, struct wl_keyboard *keyboard, uint32_t format, int fd, uint32_t size);
@@ -893,6 +898,11 @@ cv_wl_keyboard::~cv_wl_keyboard()
     wl_keyboard_destroy(keyboard_);
 }
 
+uint32_t cv_wl_keyboard::get_modifiers() const
+{
+    return modifiers_;
+}
+
 std::queue<int> cv_wl_keyboard::get_key_queue()
 {
     return std::move(key_queue_);
@@ -959,6 +969,29 @@ void cv_wl_keyboard::handle_kb_modifiers(void *data, struct wl_keyboard *keyboar
                         uint32_t mods_latched, uint32_t mods_locked,
                         uint32_t group)
 {
+    auto *kb = reinterpret_cast<cv_wl_keyboard *>(data);
+
+    if (!kb->xkb_.keymap)
+        return;
+
+    xkb_state_update_mask(
+        kb->xkb_.state, mods_depressed,
+        mods_latched, mods_locked, 0, 0, group
+    );
+
+    xkb_mod_mask_t mask = xkb_state_serialize_mods(
+        kb->xkb_.state,
+        static_cast<xkb_state_component>(
+            XKB_STATE_MODS_DEPRESSED | XKB_STATE_MODS_LATCHED)
+    );
+
+    kb->modifiers_ = 0;
+    if (mask & kb->xkb_.control_mask)
+        kb->modifiers_ |= cv_wl_keyboard::MOD_CONTROL_MASK;
+    if (mask & kb->xkb_.alt_mask)
+        kb->modifiers_ |= cv_wl_keyboard::MOD_ALT_MASK;
+    if (mask & kb->xkb_.shift_mask)
+        kb->modifiers_ |= cv_wl_keyboard::MOD_SHIFT_MASK;
 }
 
 void cv_wl_keyboard::handle_kb_repeat(void *data, struct wl_keyboard *wl_keyboard, int32_t rate, int32_t delay)
@@ -1874,8 +1907,25 @@ void cv_wl_window::interactive_move()
     );
 }
 
+static int get_kb_modifiers_flag(weak_ptr<cv_wl_keyboard> kb)
+{
+    int flag = 0;
+    auto modifiers = kb.lock()->get_modifiers();
+
+    if (modifiers & cv_wl_keyboard::MOD_CONTROL_MASK)
+        flag |= cv::EVENT_FLAG_CTRLKEY;
+    if (modifiers & cv_wl_keyboard::MOD_ALT_MASK)
+        flag |= cv::EVENT_FLAG_ALTKEY;
+    if (modifiers & cv_wl_keyboard::MOD_SHIFT_MASK)
+        flag |= cv::EVENT_FLAG_SHIFTKEY;
+
+    return flag;
+}
+
 void cv_wl_window::deliver_mouse_event(int event, cv::Point const& p, int flag)
 {
+    flag |= get_kb_modifiers_flag(display_->input().lock()->keyboard());
+
     for (size_t i = 0; i < widgets_.size(); ++i) {
         auto const& rect = widget_geometries_[i];
         if (rect.contains(p))
