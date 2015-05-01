@@ -307,8 +307,7 @@ public:
     void attach_to_surface(struct wl_surface *surface, int32_t x, int32_t y);
 
 private:
-    static int number_;
-    std::string shm_path_;
+    int fd_ = -1;
     bool busy_ = false;
     cv::Size size_{0, 0};
     struct wl_buffer *buffer_ = nullptr;
@@ -317,6 +316,8 @@ private:
     };
     void *shm_data_ = nullptr;
 
+    static int create_tmpfile(std::string const& tmpname);
+    static int create_anonymous_file(off_t size);
     static void handle_buffer_release(void *data, struct wl_buffer *buffer);
 };
 
@@ -1048,8 +1049,6 @@ void cv_wl_input::handle_seat_name(void *data, struct wl_seat *wl_seat, const ch
 /*
  * cv_wl_buffer implementation
  */
-int cv_wl_buffer::number_ = 0;
-
 cv_wl_buffer::cv_wl_buffer()
 {
 }
@@ -1066,13 +1065,17 @@ void cv_wl_buffer::destroy()
         buffer_ = nullptr;
     }
 
+    if (fd_ >= 0) {
+        close(fd_);
+        fd_ = -1;
+    }
+
     if (shm_data_ && shm_data_ != MAP_FAILED) {
         munmap(shm_data_, size_.area() * 4);
         shm_data_ = nullptr;
     }
 
     size_.width = size_.height = 0;
-    shm_unlink(shm_path_.c_str());
 }
 
 void cv_wl_buffer::busy(bool busy)
@@ -1108,36 +1111,54 @@ void cv_wl_buffer::create_shm(struct wl_shm *shm, cv::Size size, uint32_t format
     int stride = size_.width * 4;
     int buffer_size = stride * size_.height;
 
-    shm_path_ = "/opencv_shm-" + std::to_string(number_++);
-    int fd = shm_open(shm_path_.c_str(), O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
-    if (fd < 0)
-        CV_Error_(StsNoMem, ("failed to create a shared memory: %s", shm_path_.c_str()));
+    fd_ = this->create_anonymous_file(buffer_size);
 
-    if (ftruncate(fd, buffer_size) < 0) {
-        int errno_ = errno;
-        close(fd);
-        throw_system_error("failed to truncate a shm buffer", errno_);
-    }
-
-    shm_data_ = mmap(NULL, buffer_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    shm_data_ = mmap(NULL, buffer_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
     if (shm_data_ == MAP_FAILED) {
         int errno_ = errno;
-        close(fd);
         this->destroy();
         throw_system_error("failed to map shm", errno_);
     }
 
-    struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, buffer_size);
+    struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd_, buffer_size);
     buffer_ = wl_shm_pool_create_buffer(pool, 0, size_.width, size_.height, stride, format);
     wl_buffer_add_listener(buffer_, &buffer_listener_, this);
     wl_shm_pool_destroy(pool);
-    close(fd);
 }
 
 void cv_wl_buffer::attach_to_surface(struct wl_surface *surface, int32_t x, int32_t y)
 {
     wl_surface_attach(surface, buffer_, x, y);
     this->busy();
+}
+
+int cv_wl_buffer::create_tmpfile(std::string const& tmpname)
+{
+    std::vector<char> filename(tmpname.begin(), tmpname.end());
+    filename.push_back('\0');
+
+    int fd = mkostemp(filename.data(), O_CLOEXEC);
+    if (fd >= 0)
+        unlink(filename.data());
+    else
+        CV_Error_(StsInternal,
+            ("Failed to create a tmp file: %s: %s",
+                tmpname.c_str(), strerror(errno)));
+    return fd;
+}
+
+int cv_wl_buffer::create_anonymous_file(off_t size)
+{
+    auto path = getenv("XDG_RUNTIME_DIR") + std::string("/opencv-shared-XXXXXX");
+    int fd = create_tmpfile(path);
+
+    int ret = posix_fallocate(fd, 0, size);
+    if (ret != 0) {
+        close(fd);
+        throw_system_error("Failed to fallocate shm", errno);
+    }
+
+    return fd;
 }
 
 void cv_wl_buffer::handle_buffer_release(void *data, struct wl_buffer *buffer)
