@@ -527,20 +527,7 @@ struct cv_wl_mouse_callback {
     }
 };
 
-class cv_wl_window_state {
-public:
-    friend cv_wl_window;
-
-    cv::Size prev_size() const { return prev_size_; }
-    bool maximized() const { return maximized_; }
-    bool fullscreen() const { return fullscreen_; }
-    bool resizing() const { return resizing_; }
-    bool focused() const { return focused_; }
-
-private:
-    cv::Size prev_size_;
-    bool maximized_, fullscreen_, resizing_, focused_;
-
+struct cv_wl_window_state {
     cv_wl_window_state()
     {
         reset();
@@ -548,9 +535,11 @@ private:
 
     void reset()
     {
-        prev_size_ = cv::Size(0, 0);
-        maximized_ = fullscreen_ = resizing_ = focused_ = false;
+        maximized = fullscreen = resizing = focused = false;
     }
+
+    cv::Size prev_size_{0, 0};
+    bool maximized, fullscreen, resizing, focused;
 };
 
 class cv_wl_window {
@@ -565,6 +554,7 @@ public:
     cv::Size get_size() const;
     std::string const& get_title() const;
     void set_title(std::string const& title);
+    cv_wl_window_state const& state() const;
 
     void show_image(cv::Mat const& image);
 
@@ -586,8 +576,6 @@ public:
     std::tuple<cv::Size, std::vector<cv::Rect>> manage_widget_geometry(cv::Size const& new_size);
     void show(cv::Size const& new_size = cv::Size(0, 0));
 
-    cv_wl_window_state state_;
-
 private:
     cv::Size size_{640, 480};
     std::string title_;
@@ -607,6 +595,7 @@ private:
         &handle_frame_callback
     };
 
+    cv_wl_window_state state_;
     struct {
         bool repaint_request = false;  /* we need to redraw as soon as possible (some states are changed) */
         bool resize_request = false;
@@ -1305,7 +1294,7 @@ void cv_wl_titlebar::on_mouse(int event, cv::Point const& p, int flag)
         if (btn_close_.contains(p)) {
             exit(EXIT_SUCCESS);
         } else if (btn_max_.contains(p)) {
-            window_->set_maximized(!window_->state_.maximized());
+            window_->set_maximized(!window_->state().maximized);
         } else if (btn_min_.contains(p)) {
             window_->set_minimized();
         } else {
@@ -1630,6 +1619,11 @@ void cv_wl_window::set_title(std::string const& title)
 {
     title_ = title;
     xdg_surface_set_title(shell_surface_, title_.c_str());
+}
+
+cv_wl_window_state const& cv_wl_window::state() const
+{
+    return state_;
 }
 
 cv_wl_buffer* cv_wl_window::next_buffer()
@@ -2065,22 +2059,22 @@ void cv_wl_window::handle_surface_configure(
         uint32_t state = *(reinterpret_cast<uint32_t *>(p));
         switch (state) {
         case XDG_SURFACE_STATE_MAXIMIZED:
-            window->state_.maximized_ = true;
-            if (!old_state.maximized_) {
+            window->state_.maximized = true;
+            if (!old_state.maximized) {
                 window->state_.prev_size_ = window->size_;
                 window->show(size);
             }
             break;
         case XDG_SURFACE_STATE_FULLSCREEN:
-            window->state_.fullscreen_ = true;
+            window->state_.fullscreen = true;
             break;
         case XDG_SURFACE_STATE_RESIZING:
-            window->state_.resizing_ = true;
+            window->state_.resizing = true;
             if (size.area() != 0)
                 window->show(size);
             break;
         case XDG_SURFACE_STATE_ACTIVATED:
-            window->state_.focused_ = true;
+            window->state_.focused = true;
             break;
         default:
             /* Unknown state */
@@ -2089,15 +2083,15 @@ void cv_wl_window::handle_surface_configure(
     }
 
     /* When unmaximized, resize to the previous size */
-    if (old_state.maximized_ && !window->state_.maximized_)
+    if (old_state.maximized && !window->state_.maximized)
         window->show(old_state.prev_size_);
 
 #ifndef NDEBUG
     std::cerr << "[*] DEBUG: " << __func__
-        << ": maximized=" << window->state_.maximized_
-        << " fullscreen=" << window->state_.fullscreen_
-        << " resizing=" << window->state_.resizing_
-        << " focused=" << window->state_.focused_
+        << ": maximized=" << window->state_.maximized
+        << " fullscreen=" << window->state_.fullscreen
+        << " resizing=" << window->state_.resizing
+        << " focused=" << window->state_.focused
         << " size=" << size << std::endl;
 #endif
 }
