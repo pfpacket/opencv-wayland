@@ -1,7 +1,5 @@
 /*
- * Wayland Backend
- * TODO:
- *  Support WINDOW_NORMAL|CV_WINDOW_KEEPRATIO in cv_wl_window and cv_wl_viewer
+ * OpenCV HighGUI Wayland Backend
  */
 
 #include "precomp.hpp"
@@ -1390,6 +1388,11 @@ void cv_wl_viewer::get_preferred_width(int& minimum, int& natural) const
     }
 }
 
+static double aspect_ratio(cv::Size const& size)
+{
+    return (double)size.height / (double)size.width;
+}
+
 void cv_wl_viewer::get_preferred_height_for_width(int width, int& minimum, int& natural) const
 {
     if (image_.size().area() == 0) {
@@ -1398,7 +1401,7 @@ void cv_wl_viewer::get_preferred_height_for_width(int width, int& minimum, int& 
         assert(width == image_.size().width);
         minimum = natural = image_.size().height;
     } else {
-        natural = (double)width * ((double)image_.size().height / (double)image_.size().width);
+        natural = width * aspect_ratio(image_.size());
         minimum = (flags_ & CV_WINDOW_FREERATIO ? 0 : natural);
     }
 }
@@ -1438,9 +1441,26 @@ cv::Rect cv_wl_viewer::draw(void *data, cv::Size const& size, bool force)
         assert(image_.size() == size);
         write_mat_to_xrgb8888(image_, data);
     } else {
-        cv::Mat resized;
-        cv::resize(image_, resized, size);
-        write_mat_to_xrgb8888(resized, data);
+        if (flags_ & CV_WINDOW_FREERATIO) {
+            cv::Mat resized;
+            cv::resize(image_, resized, size);
+            write_mat_to_xrgb8888(resized, data);
+        } else /* CV_WINDOW_KEEPRATIO */ {
+            auto rect = cv::Rect(cv::Point(0, 0), size);
+            if (aspect_ratio(size) >= aspect_ratio(image_.size())) {
+                rect.height = image_.size().height * ((double)rect.width / image_.size().width);
+            } else {
+                rect.height = size.height;
+                rect.width = image_.size().width * ((double)rect.height / image_.size().height);
+            }
+            rect.x = (size.width - rect.width) / 2;
+            rect.y = (size.height - rect.height) / 2;
+
+            auto buf = cv::Mat(size, image_.type(), CV_RGB(0xa4, 0xa4, 0xa4));
+            auto resized = buf(rect);
+            cv::resize(image_, resized, rect.size());
+            write_mat_to_xrgb8888(buf, data);
+        }
     }
 
     last_size_ = size;
