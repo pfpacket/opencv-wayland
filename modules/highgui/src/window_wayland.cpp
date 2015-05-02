@@ -32,7 +32,6 @@
 #include <wayland-client-protocol.h>
 #include <wayland-cursor.h>
 #include <wayland-util.h>
-#include <wayland-version.h>
 #include "xdg-shell-client-protocol.h"
 #include <xkbcommon/xkbcommon.h>
 
@@ -194,7 +193,7 @@ private:
     shared_ptr<cv_wl_input> input_;
     uint32_t formats_ = 0;
 
-    void init();
+    void init(const char *display);
     static void handle_reg_global(void *data, struct wl_registry *reg, uint32_t name, const char *iface, uint32_t version);
     static void handle_reg_remove(void *data, struct wl_registry *wl_registry, uint32_t name);
     static void handle_shm_format(void *data, struct wl_shm *wl_shm, uint32_t format);
@@ -329,23 +328,18 @@ public:
 
     std::string const& name() const;
     void set_to_mouse(cv_wl_mouse& mouse, uint32_t serial);
-
-    struct wl_surface *get_surface();
     void commit(int image_index = 0);
 
 private:
-    cv_wl_cursor(weak_ptr<cv_wl_display> const& display, struct wl_cursor *cursor, std::string const& name);
-
     std::string name_;
-
     struct wl_cursor *cursor_;
     struct wl_surface *surface_;
     struct wl_callback *frame_callback_ = nullptr;
-
     struct wl_callback_listener frame_listener_{
         &handle_cursor_frame
     };
 
+    cv_wl_cursor(weak_ptr<cv_wl_display> const&, struct wl_cursor *, std::string const&);
     static void handle_cursor_frame(void *data, struct wl_callback *cb, uint32_t time);
 };
 
@@ -419,10 +413,6 @@ public:
     cv::Rect draw(void *data, cv::Size const& size, bool force) override;
 
 private:
-    struct {
-        bool maximized = false;
-    } state_;
-
     cv::Mat buf_;
     cv::Rect btn_close_, btn_max_, btn_min_;
     cv::Scalar const line_color_ = CV_RGB(0xff, 0xff, 0xff);
@@ -537,6 +527,32 @@ struct cv_wl_mouse_callback {
     }
 };
 
+class cv_wl_window_state {
+public:
+    friend cv_wl_window;
+
+    cv::Size prev_size() const { return prev_size_; }
+    bool maximized() const { return maximized_; }
+    bool fullscreen() const { return fullscreen_; }
+    bool resizing() const { return resizing_; }
+    bool focused() const { return focused_; }
+
+private:
+    cv::Size prev_size_;
+    bool maximized_, fullscreen_, resizing_, focused_;
+
+    cv_wl_window_state()
+    {
+        reset();
+    }
+
+    void reset()
+    {
+        prev_size_ = cv::Size(0, 0);
+        maximized_ = fullscreen_ = resizing_ = focused_ = false;
+    }
+};
+
 class cv_wl_window {
 public:
     enum {
@@ -555,7 +571,6 @@ public:
     void create_trackbar(std::string const& name, int *value, int count, CvTrackbarCallback2 on_change, void *userdata);
     weak_ptr<cv_wl_trackbar> get_trackbar(std::string const&) const;
 
-    void deliver_mouse_event(int event, cv::Point const& p, int flag);
     void mouse_enter(cv::Point const& p, uint32_t serial);
     void mouse_leave();
     void mouse_motion(uint32_t time, cv::Point const& p);
@@ -570,6 +585,8 @@ public:
 
     std::tuple<cv::Size, std::vector<cv::Rect>> manage_widget_geometry(cv::Size const& new_size);
     void show(cv::Size const& new_size = cv::Size(0, 0));
+
+    cv_wl_window_state state_;
 
 private:
     cv::Size size_{640, 480};
@@ -591,17 +608,12 @@ private:
     };
 
     struct {
-        bool maximized = false;
-    } state_;
-
-    struct {
         bool repaint_request = false;  /* we need to redraw as soon as possible (some states are changed) */
         bool resize_request = false;
         cv::Size size{0, 0};
     } pending_;
 
     shared_ptr<cv_wl_viewer> viewer_;
-
     std::vector<shared_ptr<cv_wl_widget>> widgets_;
     std::vector<cv::Rect> widget_geometries_;
 
@@ -616,6 +628,7 @@ private:
 
     cv_wl_buffer* next_buffer();
     void commit_buffer(cv_wl_buffer *buffer, cv::Rect const&);
+    void deliver_mouse_event(int event, cv::Point const& p, int flag);
     static void handle_surface_configure(void *, struct xdg_surface *, int32_t, int32_t, struct wl_array *, uint32_t);
     static void handle_surface_close(void *data, struct xdg_surface *xdg_surface);
     static void handle_frame_callback(void *data, struct wl_callback *cb, uint32_t time);
@@ -648,16 +661,13 @@ private:
  * cv_wl_display implementation
  */
 cv_wl_display::cv_wl_display()
-    :   display_{wl_display_connect(nullptr)}
 {
-    init();
+    init(nullptr);
 }
 
-cv_wl_display::cv_wl_display(std::string const& disp)
-
-    :   display_{wl_display_connect(disp.c_str())}
+cv_wl_display::cv_wl_display(std::string const& display)
 {
-    init();
+    init(display.empty() ? nullptr : display.c_str());
 }
 
 cv_wl_display::~cv_wl_display()
@@ -669,6 +679,28 @@ cv_wl_display::~cv_wl_display()
     wl_display_flush(display_);
     input_.reset();
     wl_display_disconnect(display_);
+}
+
+void cv_wl_display::init(const char *display)
+{
+    display_ = wl_display_connect(display);
+    if (!display_)
+        throw_system_error("Could not connect to display", errno);
+
+    registry_ = wl_display_get_registry(display_);
+    wl_registry_add_listener(registry_, &reg_listener_, this);
+    wl_display_roundtrip(display_);
+    if (!compositor_ || !shm_ || !shell_ || !input_)
+        CV_Error(StsInternal, "Compositor doesn't have required interfaces");
+
+    wl_display_roundtrip(display_);
+    if (!(formats_ & (1 << WL_SHM_FORMAT_XRGB8888)))
+        CV_Error(StsInternal, "WL_SHM_FORMAT_XRGB32 not available");
+
+    poller_.add(
+        wl_display_get_fd(display_),
+        EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP
+     );
 }
 
 int cv_wl_display::dispatch()
@@ -744,27 +776,6 @@ struct wl_surface *cv_wl_display::get_surface()
 struct xdg_surface *cv_wl_display::get_shell_surface(struct wl_surface *surface)
 {
     return xdg_shell_get_xdg_surface(shell_, surface);
-}
-
-void cv_wl_display::init()
-{
-    if (!display_)
-        throw_system_error("Could not connect to display", errno);
-
-    registry_ = wl_display_get_registry(display_);
-    wl_registry_add_listener(registry_, &reg_listener_, this);
-    wl_display_roundtrip(display_);
-    if (!compositor_ || !shm_ || !shell_ || !input_)
-        CV_Error(StsInternal, "Compositor doesn't have required interfaces");
-
-    wl_display_roundtrip(display_);
-    if (!(formats_ & (1 << WL_SHM_FORMAT_XRGB8888)))
-        CV_Error(StsInternal, "WL_SHM_FORMAT_XRGB32 not available");
-
-    poller_.add(
-        wl_display_get_fd(display_),
-        EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP
-     );
 }
 
 void cv_wl_display::handle_reg_global(void *data, struct wl_registry *reg, uint32_t name, const char *iface, uint32_t version)
@@ -1196,11 +1207,6 @@ void cv_wl_cursor::set_to_mouse(cv_wl_mouse& mouse, uint32_t serial)
     mouse.set_cursor(serial, surface_, cursor_img->hotspot_x, cursor_img->hotspot_y);
 }
 
-struct wl_surface *cv_wl_cursor::get_surface()
-{
-    return surface_;
-}
-
 void cv_wl_cursor::commit(int image_index)
 {
     auto *cursor_img = cursor_->images[image_index];
@@ -1299,8 +1305,7 @@ void cv_wl_titlebar::on_mouse(int event, cv::Point const& p, int flag)
         if (btn_close_.contains(p)) {
             exit(EXIT_SUCCESS);
         } else if (btn_max_.contains(p)) {
-            state_.maximized = !state_.maximized;
-            window_->set_maximized(state_.maximized);
+            window_->set_maximized(!window_->state_.maximized());
         } else if (btn_min_.contains(p)) {
             window_->set_minimized();
         } else {
@@ -1393,7 +1398,7 @@ void cv_wl_viewer::get_preferred_width(int& minimum, int& natural) const
         minimum = natural = 0;
     } else {
         natural = image_.size().width;
-        minimum = (flags_ & cv::WINDOW_AUTOSIZE ? natural : 0);
+        minimum = (flags_ == cv::WINDOW_AUTOSIZE ? natural : 0);
     }
 }
 
@@ -1401,7 +1406,7 @@ void cv_wl_viewer::get_preferred_height_for_width(int width, int& minimum, int& 
 {
     if (image_.size().area() == 0) {
         minimum = natural = 0;
-    } else if (flags_ & cv::WINDOW_AUTOSIZE) {
+    } else if (flags_ == cv::WINDOW_AUTOSIZE) {
         assert(width == image_.size().width);
         minimum = natural = image_.size().height;
     } else {
@@ -1441,7 +1446,7 @@ cv::Rect cv_wl_viewer::draw(void *data, cv::Size const& size, bool force)
     if ((!force && !image_changed_ && last_size_ == size) || image_.size().area() == 0 || size.area() == 0)
         return cv::Rect(0, 0, 0, 0);
 
-    if (flags_ & cv::WINDOW_AUTOSIZE || image_.size() == size) {
+    if (flags_ == cv::WINDOW_AUTOSIZE || image_.size() == size) {
         assert(image_.size() == size);
         write_mat_to_xrgb8888(image_, data);
     } else {
@@ -1653,10 +1658,10 @@ void cv_wl_window::set_minimized()
 
 void cv_wl_window::set_maximized(bool maximize)
 {
-    if (maximize && !(viewer_->get_flags() & cv::WINDOW_AUTOSIZE))
-        xdg_surface_set_maximized(shell_surface_);
-    else
+    if (!maximize)
         xdg_surface_unset_maximized(shell_surface_);
+    else if (!(viewer_->get_flags() == cv::WINDOW_AUTOSIZE))
+        xdg_surface_set_maximized(shell_surface_);
 }
 
 void cv_wl_window::show_image(cv::Mat const& image)
@@ -1747,7 +1752,7 @@ cv_wl_window::manage_widget_geometry(cv::Size const& new_size)
         total_height += height;
     };
 
-    if (viewer_->get_flags() & cv::WINDOW_AUTOSIZE) {
+    if (viewer_->get_flags() == cv::WINDOW_AUTOSIZE) {
         final_width = nat_widths[0];
         calc_geometries = calc_autosize_geo;
     } else {
@@ -1969,8 +1974,8 @@ void cv_wl_window::mouse_enter(cv::Point const& p, uint32_t serial)
 
 void cv_wl_window::mouse_leave()
 {
-    cursor_.current_name.clear();
     on_mouse_.reset();
+    cursor_.current_name.clear();
 }
 
 void cv_wl_window::mouse_motion(uint32_t time, cv::Point const& p)
@@ -2009,7 +2014,7 @@ void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_butto
     /* Start a user-driven, interactive resize of the surface */
     if (WL_POINTER_BUTTON_STATE_PRESSED && !on_mouse_.drag &&
         button == cv_wl_mouse::LBUTTON && cursor_.current_name != "left_ptr" &&
-         !(viewer_->get_flags() & cv::WINDOW_AUTOSIZE)) {
+         !(viewer_->get_flags() == cv::WINDOW_AUTOSIZE)) {
         xdg_surface_resize(
             shell_surface_,
             display_->input().lock()->seat(),
@@ -2051,30 +2056,50 @@ void cv_wl_window::handle_surface_configure(
     auto size = cv::Size(width, height);
     auto *window = reinterpret_cast<cv_wl_window *>(data);
 
-    window->state_.maximized = false;
+    auto old_state = window->state_;
+    window->state_.reset();
+
     xdg_surface_ack_configure(surface, serial);
 
     wl_array_for_each(p, states) {
-        uint32_t state = *((uint32_t *)p);
+        uint32_t state = *(reinterpret_cast<uint32_t *>(p));
         switch (state) {
         case XDG_SURFACE_STATE_MAXIMIZED:
-            window->state_.maximized = true;
-            window->show(size);
-            break;
-        case XDG_SURFACE_STATE_FULLSCREEN:
-            break;
-        case XDG_SURFACE_STATE_RESIZING:
-            if (size.area() != 0) {
+            window->state_.maximized_ = true;
+            if (!old_state.maximized_) {
+                window->state_.prev_size_ = window->size_;
                 window->show(size);
             }
             break;
+        case XDG_SURFACE_STATE_FULLSCREEN:
+            window->state_.fullscreen_ = true;
+            break;
+        case XDG_SURFACE_STATE_RESIZING:
+            window->state_.resizing_ = true;
+            if (size.area() != 0)
+                window->show(size);
+            break;
         case XDG_SURFACE_STATE_ACTIVATED:
+            window->state_.focused_ = true;
             break;
         default:
             /* Unknown state */
             break;
         }
     }
+
+    /* When unmaximized, resize to the previous size */
+    if (old_state.maximized_ && !window->state_.maximized_)
+        window->show(old_state.prev_size_);
+
+#ifndef NDEBUG
+    std::cerr << "[*] DEBUG: " << __func__
+        << ": maximized=" << window->state_.maximized_
+        << " fullscreen=" << window->state_.fullscreen_
+        << " resizing=" << window->state_.resizing_
+        << " focused=" << window->state_.focused_
+        << " size=" << size << std::endl;
+#endif
 }
 
 void cv_wl_window::handle_surface_close(void *data, struct xdg_surface *surface)
@@ -2101,7 +2126,6 @@ void cv_wl_core::init()
     display_ = std::make_shared<cv_wl_display>();
     if (!display_)
         CV_Error(StsNoMem, "Could not create display");
-    display_->roundtrip();
 }
 
 shared_ptr<cv_wl_display> cv_wl_core::display()
