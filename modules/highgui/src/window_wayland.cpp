@@ -68,8 +68,7 @@ extern shared_ptr<cv_wl_core> cv_core;
 
 static int xkb_keysym_to_ascii(xkb_keysym_t keysym)
 {
-    /* Remove most significant 8 bytes (0xff) */
-    return static_cast<uint8_t>(keysym);
+    return (keysym & 0xff);
 }
 
 /*
