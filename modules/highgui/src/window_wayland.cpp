@@ -446,6 +446,7 @@ public:
 private:
     int flags_;
     cv::Mat image_;
+    cv::Rect last_img_area_;
     bool image_changed_ = false;
 
     void *param_ = nullptr;
@@ -1424,9 +1425,8 @@ void cv_wl_viewer::on_mouse(int event, cv::Point const& p, int flag)
             last_event_time = now;
 
             /* Scale the coordinate to match the client's image coordinate */
-            int x = p.x * ((double)image_.size().width / last_size_.width);
-            int y = p.y * ((double)image_.size().height / last_size_.height);
-
+            int x = (p.x - last_img_area_.x) * ((double)image_.size().width / last_img_area_.width);
+            int y = (p.y - last_img_area_.y) * ((double)image_.size().height / last_img_area_.height);
             callback_(event, x, y, flag, param_);
         }
     }
@@ -1436,6 +1436,8 @@ cv::Rect cv_wl_viewer::draw(void *data, cv::Size const& size, bool force)
 {
     if ((!force && !image_changed_ && last_size_ == size) || image_.size().area() == 0 || size.area() == 0)
         return cv::Rect(0, 0, 0, 0);
+
+    last_img_area_ = cv::Rect(cv::Point(0, 0), size);
 
     if (flags_ == cv::WINDOW_AUTOSIZE || image_.size() == size) {
         assert(image_.size() == size);
@@ -1460,6 +1462,8 @@ cv::Rect cv_wl_viewer::draw(void *data, cv::Size const& size, bool force)
             auto resized = buf(rect);
             cv::resize(image_, resized, rect.size());
             write_mat_to_xrgb8888(buf, data);
+
+            last_img_area_ = rect;
         }
     }
 
