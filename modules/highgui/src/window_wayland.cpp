@@ -571,7 +571,6 @@ public:
     void set_minimized();
     void set_maximized(bool maximize = true);
 
-    std::tuple<cv::Size, std::vector<cv::Rect>> manage_widget_geometry(cv::Size const& new_size);
     void show(cv::Size const& new_size = cv::Size(0, 0));
 
 private:
@@ -616,6 +615,8 @@ private:
     cv_wl_buffer* next_buffer();
     void commit_buffer(cv_wl_buffer *buffer, cv::Rect const&);
     void deliver_mouse_event(int event, cv::Point const& p, int flag);
+    std::tuple<cv::Size, std::vector<cv::Rect>> manage_widget_geometry(cv::Size const& new_size);
+
     static void handle_surface_configure(void *, struct xdg_surface *, int32_t, int32_t, struct wl_array *, uint32_t);
     static void handle_surface_close(void *data, struct xdg_surface *xdg_surface);
     static void handle_frame_callback(void *data, struct wl_callback *cb, uint32_t time);
@@ -1651,14 +1652,12 @@ cv_wl_window_state const& cv_wl_window::state() const
 
 cv_wl_buffer* cv_wl_window::next_buffer()
 {
-    cv_wl_buffer *buffer;
+    cv_wl_buffer *buffer = nullptr;
 
     if (!buffers_.at(0).is_busy())
         buffer = &buffers_[0];
     else if (!buffers_.at(1).is_busy())
         buffer = &buffers_[1];
-    else
-        return nullptr;
 
     return buffer;
 }
