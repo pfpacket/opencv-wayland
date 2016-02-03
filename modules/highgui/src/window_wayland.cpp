@@ -2322,6 +2322,10 @@ CV_IMPL void cvSetTrackbarMax(const char* trackbar_name, const char* window_name
     }
 }
 
+CV_IMPL void cvSetTrackbarMin(const char* trackbar_name, const char* window_name, int minval)
+{
+}
+
 CV_IMPL void cvSetMouseCallback(const char* window_name, CvMouseCallback on_mouse, void* param)
 {
     cvInitSystem(0, NULL);
