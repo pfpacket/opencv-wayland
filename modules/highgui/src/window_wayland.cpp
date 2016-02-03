@@ -216,7 +216,7 @@ private:
     struct wl_pointer_listener pointer_listener_{
         &handle_pointer_enter, &handle_pointer_leave,
         &handle_pointer_motion, &handle_pointer_button,
-        &handle_pointer_axis
+        &handle_pointer_axis, &handle_pointer_frame
     };
     cv_wl_window *focus_window_;
 
@@ -225,6 +225,7 @@ private:
     static void handle_pointer_motion(void *data, struct wl_pointer *pointer, uint32_t time, wl_fixed_t sx, wl_fixed_t sy);
     static void handle_pointer_button(void *data, struct wl_pointer *wl_pointer, uint32_t serial, uint32_t time, uint32_t button, uint32_t state);
     static void handle_pointer_axis(void *data, struct wl_pointer *wl_pointer, uint32_t time, uint32_t axis, wl_fixed_t value);
+    static void handle_pointer_frame(void *data, struct wl_pointer *wl_pointer) {}
 };
 
 class cv_wl_keyboard {
