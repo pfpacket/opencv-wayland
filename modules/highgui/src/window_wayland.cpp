@@ -26,12 +26,12 @@
 #include <sys/epoll.h>
 #include <linux/input.h>
 
+#include <xkbcommon/xkbcommon.h>
 #include <wayland-client.h>
 #include <wayland-client-protocol.h>
 #include <wayland-cursor.h>
 #include <wayland-util.h>
-#include "xdg-shell-client-protocol.h"
-#include <xkbcommon/xkbcommon.h>
+#include "xdg-shell-unstable-v6-client-protocol.h"
 
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
@@ -173,7 +173,7 @@ public:
     weak_ptr<cv_wl_input> input();
     uint32_t formats() const;
     struct wl_surface *get_surface();
-    struct xdg_surface *get_shell_surface(struct wl_surface *surface);
+    struct zxdg_surface_v6 *get_shell_surface(struct wl_surface *surface);
 
 private:
     epoller poller_;
@@ -185,8 +185,8 @@ private:
     struct wl_compositor *compositor_ = nullptr;
     struct wl_shm *shm_ = nullptr;
     struct wl_shm_listener shm_listener_{&handle_shm_format};
-    struct xdg_shell *shell_ = nullptr;
-    struct xdg_shell_listener shell_listener_{&handle_shell_ping};
+    struct zxdg_shell_v6 *shell_ = nullptr;
+    struct zxdg_shell_v6_listener shell_listener_{&handle_shell_ping};
     shared_ptr<cv_wl_input> input_;
     uint32_t formats_ = 0;
 
@@ -194,7 +194,7 @@ private:
     static void handle_reg_global(void *data, struct wl_registry *reg, uint32_t name, const char *iface, uint32_t version);
     static void handle_reg_remove(void *data, struct wl_registry *wl_registry, uint32_t name);
     static void handle_shm_format(void *data, struct wl_shm *wl_shm, uint32_t format);
-    static void handle_shell_ping(void *data, struct xdg_shell *shell, uint32_t serial);
+    static void handle_shell_ping(void *data, struct zxdg_shell_v6 *shell, uint32_t serial);
 };
 
 class cv_wl_mouse {
@@ -216,7 +216,9 @@ private:
     struct wl_pointer_listener pointer_listener_{
         &handle_pointer_enter, &handle_pointer_leave,
         &handle_pointer_motion, &handle_pointer_button,
-        &handle_pointer_axis, &handle_pointer_frame
+        &handle_pointer_axis, &handle_pointer_frame,
+        &handle_pointer_axis_source, &handle_pointer_axis_stop,
+        &handle_pointer_axis_discrete
     };
     cv_wl_window *focus_window_;
 
@@ -226,6 +228,9 @@ private:
     static void handle_pointer_button(void *data, struct wl_pointer *wl_pointer, uint32_t serial, uint32_t time, uint32_t button, uint32_t state);
     static void handle_pointer_axis(void *data, struct wl_pointer *wl_pointer, uint32_t time, uint32_t axis, wl_fixed_t value);
     static void handle_pointer_frame(void *data, struct wl_pointer *wl_pointer) {}
+    static void handle_pointer_axis_source(void *data, struct wl_pointer *wl_pointer, uint32_t axis_source) {}
+    static void handle_pointer_axis_stop(void *data, struct wl_pointer *wl_pointer, uint32_t time, uint32_t axis) {}
+    static void handle_pointer_axis_discrete(void *data, struct wl_pointer *wl_pointer, uint32_t axis, int32_t discrete) {}
 };
 
 class cv_wl_keyboard {
@@ -580,10 +585,16 @@ private:
 
     shared_ptr<cv_wl_display> display_;
     struct wl_surface *surface_;
-    struct xdg_surface *shell_surface_;
-    struct xdg_surface_listener shsurf_listener{
-        &handle_surface_configure, &handle_surface_close
+    struct zxdg_surface_v6 *xdg_surface_;
+    struct zxdg_surface_v6_listener xdgsurf_listener_{
+        &handle_surface_configure,
     };
+    struct zxdg_toplevel_v6 *xdg_toplevel_;
+    struct zxdg_toplevel_v6_listener xdgtop_listener_{
+        &handle_toplevel_configure, &handle_toplevel_close
+    };
+    bool wait_for_configure_ = true;
+
     /* double buffered */
     std::array<cv_wl_buffer, 2> buffers_;
 
@@ -618,8 +629,9 @@ private:
     void deliver_mouse_event(int event, cv::Point const& p, int flag);
     std::tuple<cv::Size, std::vector<cv::Rect>> manage_widget_geometry(cv::Size const& new_size);
 
-    static void handle_surface_configure(void *, struct xdg_surface *, int32_t, int32_t, struct wl_array *, uint32_t);
-    static void handle_surface_close(void *data, struct xdg_surface *xdg_surface);
+    static void handle_surface_configure(void *data, struct zxdg_surface_v6 *surface, uint32_t serial);
+    static void handle_toplevel_configure(void *, struct zxdg_toplevel_v6 *, int32_t, int32_t, struct wl_array *);
+    static void handle_toplevel_close(void *data, struct zxdg_toplevel_v6 *zxdg_toplevel_v6);
     static void handle_frame_callback(void *data, struct wl_callback *cb, uint32_t time);
 };
 
@@ -662,7 +674,7 @@ cv_wl_display::cv_wl_display(std::string const& display)
 cv_wl_display::~cv_wl_display()
 {
     wl_shm_destroy(shm_);
-    xdg_shell_destroy(shell_);
+    zxdg_shell_v6_destroy(shell_);
     wl_compositor_destroy(compositor_);
     wl_registry_destroy(registry_);
     wl_display_flush(display_);
@@ -762,9 +774,9 @@ struct wl_surface *cv_wl_display::get_surface()
     return wl_compositor_create_surface(compositor_);
 }
 
-struct xdg_surface *cv_wl_display::get_shell_surface(struct wl_surface *surface)
+struct zxdg_surface_v6 *cv_wl_display::get_shell_surface(struct wl_surface *surface)
 {
-    return xdg_shell_get_xdg_surface(shell_, surface);
+    return zxdg_shell_v6_get_xdg_surface(shell_, surface);
 }
 
 void cv_wl_display::handle_reg_global(void *data, struct wl_registry *reg, uint32_t name, const char *iface, uint32_t version)
@@ -779,11 +791,10 @@ void cv_wl_display::handle_reg_global(void *data, struct wl_registry *reg, uint3
         display->shm_ = (struct wl_shm *)
             wl_registry_bind(reg, name, &wl_shm_interface, version);
         wl_shm_add_listener(display->shm_, &display->shm_listener_, display);
-    } else if (interface == "xdg_shell") {
-        display->shell_ = (struct xdg_shell *)
-            wl_registry_bind(reg, name, &xdg_shell_interface, version);
-        xdg_shell_use_unstable_version(display->shell_, XDG_SHELL_VERSION_CURRENT);
-        xdg_shell_add_listener(display->shell_, &display->shell_listener_, display);
+    } else if (interface == "zxdg_shell_v6") {
+        display->shell_ = (struct zxdg_shell_v6 *)
+            wl_registry_bind(reg, name, &zxdg_shell_v6_interface, version);
+        zxdg_shell_v6_add_listener(display->shell_, &display->shell_listener_, display);
     } else if (interface == "wl_seat") {
         struct wl_seat *seat = (struct wl_seat *)
             wl_registry_bind(reg, name, &wl_seat_interface, version);
@@ -801,9 +812,9 @@ void cv_wl_display::handle_shm_format(void *data, struct wl_shm *wl_shm, uint32_
     display->formats_ |= (1 << format);
 }
 
-void cv_wl_display::handle_shell_ping(void *data, struct xdg_shell *shell, uint32_t serial)
+void cv_wl_display::handle_shell_ping(void *data, struct zxdg_shell_v6 *shell, uint32_t serial)
 {
-    xdg_shell_pong(shell, serial);
+    zxdg_shell_v6_pong(shell, serial);
 }
 
 
@@ -1606,12 +1617,16 @@ cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string
         surface_(display->get_surface()),
         cursor_{{}, {display, "default", DEFAULT_CURSOR_SIZE}}
 {
-    shell_surface_ = display->get_shell_surface(surface_);
-    if (!shell_surface_)
-        CV_Error(StsInternal, "Failed to get xdg_surface");
+    xdg_surface_ = display->get_shell_surface(surface_);
+    if (!xdg_surface_)
+        CV_Error(StsInternal, "Failed to get zxdg_surface_v6");
+    zxdg_surface_v6_add_listener(xdg_surface_, &xdgsurf_listener_, this);
 
-    xdg_surface_add_listener(shell_surface_, &shsurf_listener, this);
-    xdg_surface_set_title(shell_surface_, title_.c_str());
+    xdg_toplevel_ = zxdg_surface_v6_get_toplevel(xdg_surface_);
+    if (!xdg_toplevel_)
+        CV_Error(StsInternal, "Failed to get zxdg_toplevel_v6");
+    zxdg_toplevel_v6_add_listener(xdg_toplevel_, &xdgtop_listener_, this);
+    zxdg_toplevel_v6_set_title(xdg_toplevel_, title_.c_str());
 
     wl_surface_set_user_data(surface_, this);
 
@@ -1620,13 +1635,16 @@ cv_wl_window::cv_wl_window(shared_ptr<cv_wl_display> const& display, std::string
 
     viewer_ = std::make_shared<cv_wl_viewer>(this, flags);
     widget_geometries_.emplace_back(0, 0, 0, 0);
+
+    wl_surface_commit(surface_);
 }
 
 cv_wl_window::~cv_wl_window()
 {
     if (frame_callback_)
         wl_callback_destroy(frame_callback_);
-    xdg_surface_destroy(shell_surface_);
+    zxdg_toplevel_v6_destroy(xdg_toplevel_);
+    zxdg_surface_v6_destroy(xdg_surface_);
     wl_surface_destroy(surface_);
 }
 
@@ -1643,7 +1661,7 @@ std::string const& cv_wl_window::get_title() const
 void cv_wl_window::set_title(std::string const& title)
 {
     title_ = title;
-    xdg_surface_set_title(shell_surface_, title_.c_str());
+    zxdg_toplevel_v6_set_title(xdg_toplevel_, title_.c_str());
 }
 
 cv_wl_window_state const& cv_wl_window::state() const
@@ -1670,15 +1688,15 @@ void cv_wl_window::set_mouse_callback(CvMouseCallback on_mouse, void *param)
 
 void cv_wl_window::set_minimized()
 {
-    xdg_surface_set_minimized(shell_surface_);
+    zxdg_toplevel_v6_set_minimized(xdg_toplevel_);
 }
 
 void cv_wl_window::set_maximized(bool maximize)
 {
     if (!maximize)
-        xdg_surface_unset_maximized(shell_surface_);
+        zxdg_toplevel_v6_unset_maximized(xdg_toplevel_);
     else if (!(viewer_->get_flags() == cv::WINDOW_AUTOSIZE))
-        xdg_surface_set_maximized(shell_surface_);
+        zxdg_toplevel_v6_set_maximized(xdg_toplevel_);
 }
 
 void cv_wl_window::show_image(cv::Mat const& image)
@@ -1803,6 +1821,11 @@ cv_wl_window::manage_widget_geometry(cv::Size const& new_size)
 
 void cv_wl_window::show(cv::Size const& size)
 {
+    if (wait_for_configure_) {
+        pending_.repaint_request = true;
+        return;
+    }
+
     auto *buffer = this->next_buffer();
     if (!next_frame_ready_ || !buffer) {
         if (size.area() == 0) {
@@ -1912,18 +1935,18 @@ static std::string get_cursor_name(int x, int y, cv::Size const& size, bool grab
     return cursor;
 }
 
-static xdg_surface_resize_edge cursor_name_to_enum(std::string const& cursor)
+static zxdg_toplevel_v6_resize_edge cursor_name_to_enum(std::string const& cursor)
 {
 
-    if (cursor == "top_left_corner") return XDG_SURFACE_RESIZE_EDGE_TOP_LEFT;
-    else if (cursor == "top_right_corner") return XDG_SURFACE_RESIZE_EDGE_TOP_RIGHT;
-    else if (cursor == "top_side") return XDG_SURFACE_RESIZE_EDGE_TOP;
-    else if (cursor == "bottom_left_corner") return XDG_SURFACE_RESIZE_EDGE_BOTTOM_LEFT;
-    else if (cursor == "bottom_right_corner") return XDG_SURFACE_RESIZE_EDGE_BOTTOM_RIGHT;
-    else if (cursor == "bottom_side") return XDG_SURFACE_RESIZE_EDGE_BOTTOM;
-    else if (cursor == "left_side") return XDG_SURFACE_RESIZE_EDGE_LEFT;
-    else if (cursor == "right_side") return XDG_SURFACE_RESIZE_EDGE_RIGHT;
-    else return XDG_SURFACE_RESIZE_EDGE_NONE;
+    if (cursor == "top_left_corner") return ZXDG_TOPLEVEL_V6_RESIZE_EDGE_TOP_LEFT;
+    else if (cursor == "top_right_corner") return ZXDG_TOPLEVEL_V6_RESIZE_EDGE_TOP_RIGHT;
+    else if (cursor == "top_side") return ZXDG_TOPLEVEL_V6_RESIZE_EDGE_TOP;
+    else if (cursor == "bottom_left_corner") return ZXDG_TOPLEVEL_V6_RESIZE_EDGE_BOTTOM_LEFT;
+    else if (cursor == "bottom_right_corner") return ZXDG_TOPLEVEL_V6_RESIZE_EDGE_BOTTOM_RIGHT;
+    else if (cursor == "bottom_side") return ZXDG_TOPLEVEL_V6_RESIZE_EDGE_BOTTOM;
+    else if (cursor == "left_side") return ZXDG_TOPLEVEL_V6_RESIZE_EDGE_LEFT;
+    else if (cursor == "right_side") return ZXDG_TOPLEVEL_V6_RESIZE_EDGE_RIGHT;
+    else return ZXDG_TOPLEVEL_V6_RESIZE_EDGE_NONE;
 }
 
 void cv_wl_window::update_cursor(cv::Point const& p, bool grab)
@@ -1943,8 +1966,8 @@ void cv_wl_window::update_cursor(cv::Point const& p, bool grab)
 
 void cv_wl_window::interactive_move()
 {
-    xdg_surface_move(
-        shell_surface_,
+    zxdg_toplevel_v6_move(
+        xdg_toplevel_,
         display_->input().lock()->seat(),
         mouse_button_serial_
     );
@@ -2032,8 +2055,8 @@ void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_butto
     if (WL_POINTER_BUTTON_STATE_PRESSED && !on_mouse_.drag &&
         button == cv_wl_mouse::LBUTTON && cursor_.current_name != "left_ptr" &&
          !(viewer_->get_flags() == cv::WINDOW_AUTOSIZE)) {
-        xdg_surface_resize(
-            shell_surface_,
+        zxdg_toplevel_v6_resize(
+            xdg_toplevel_,
             display_->input().lock()->seat(),
             serial,
             cursor_name_to_enum(cursor_.current_name)
@@ -2065,9 +2088,22 @@ void cv_wl_window::mouse_button(uint32_t time, uint32_t button, wl_pointer_butto
     this->deliver_mouse_event(event, on_mouse_.last, flag);
 }
 
-void cv_wl_window::handle_surface_configure(
-    void *data, struct xdg_surface *surface,
-    int32_t width, int32_t height, struct wl_array *states, uint32_t serial)
+void cv_wl_window::handle_surface_configure(void *data, struct zxdg_surface_v6 *surface, uint32_t serial)
+{
+    auto *window = reinterpret_cast<cv_wl_window *>(data);
+
+    zxdg_surface_v6_ack_configure(surface, serial);
+
+    if (window->wait_for_configure_) {
+        window->wait_for_configure_ = false;
+        if (window->pending_.repaint_request)
+            window->show();
+    }
+}
+
+void cv_wl_window::handle_toplevel_configure(
+    void *data, struct zxdg_toplevel_v6 *toplevel,
+    int32_t width, int32_t height, struct wl_array *states)
 {
     void *p;
     auto size = cv::Size(width, height);
@@ -2076,27 +2112,25 @@ void cv_wl_window::handle_surface_configure(
     auto old_state = window->state_;
     window->state_.reset();
 
-    xdg_surface_ack_configure(surface, serial);
-
     wl_array_for_each(p, states) {
         uint32_t state = *(reinterpret_cast<uint32_t *>(p));
         switch (state) {
-        case XDG_SURFACE_STATE_MAXIMIZED:
+        case ZXDG_TOPLEVEL_V6_STATE_MAXIMIZED:
             window->state_.maximized = true;
             if (!old_state.maximized) {
                 window->state_.prev_size_ = window->size_;
                 window->show(size);
             }
             break;
-        case XDG_SURFACE_STATE_FULLSCREEN:
+        case ZXDG_TOPLEVEL_V6_STATE_FULLSCREEN:
             window->state_.fullscreen = true;
             break;
-        case XDG_SURFACE_STATE_RESIZING:
+        case ZXDG_TOPLEVEL_V6_STATE_RESIZING:
             window->state_.resizing = true;
             if (size.area() != 0)
                 window->show(size);
             break;
-        case XDG_SURFACE_STATE_ACTIVATED:
+        case ZXDG_TOPLEVEL_V6_STATE_ACTIVATED:
             window->state_.focused = true;
             break;
         default:
@@ -2119,7 +2153,7 @@ void cv_wl_window::handle_surface_configure(
 #endif
 }
 
-void cv_wl_window::handle_surface_close(void *data, struct xdg_surface *surface)
+void cv_wl_window::handle_toplevel_close(void *data, struct zxdg_toplevel_v6 *surface)
 {
     //auto *window = reinterpret_cast<cv_wl_window *>(data);
 }
