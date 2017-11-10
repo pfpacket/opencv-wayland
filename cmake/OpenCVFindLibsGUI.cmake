@@ -11,6 +11,15 @@ if(WITH_WIN32UI)
     CMAKE_FLAGS "-DLINK_LIBRARIES:STRING=user32;gdi32")
 endif()
 
+# --- Wayland ---
+ocv_clear_vars(HAVE_WAYLAND)
+if(WITH_WAYLAND AND NOT HAVE_QT AND NOT HAVE_GTK)
+  CHECK_MODULE(wayland-client HAVE_WAYLAND_CLIENT HIGHGUI)
+  if(HAVE_WAYLAND_CLIENT)
+      set(HAVE_WAYLAND TRUE)
+  endif()
+endif()
+
 # --- QT4 ---
 ocv_clear_vars(HAVE_QT HAVE_QT5)
 if(WITH_QT)
@@ -60,15 +69,6 @@ if(WITH_GTK AND NOT HAVE_QT)
   endif()
   if(WITH_OPENGL AND NOT HAVE_GTK3)
     CHECK_MODULE(gtkglext-1.0 HAVE_GTKGLEXT HIGHGUI)
-  endif()
-endif()
-
-# --- Wayland ---
-ocv_clear_vars(HAVE_WAYLAND)
-if(WITH_WAYLAND AND NOT HAVE_QT AND NOT HAVE_GTK)
-  CHECK_MODULE(wayland-client HAVE_WAYLAND_CLIENT)
-  if(HAVE_WAYLAND_CLIENT)
-      set(HAVE_WAYLAND TRUE)
   endif()
 endif()
 
