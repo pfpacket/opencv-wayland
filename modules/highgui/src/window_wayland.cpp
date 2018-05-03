@@ -2240,7 +2240,7 @@ CV_IMPL int cvInitSystem(int argc, char **argv)
     if (!cv_core) {
         cv_core = std::make_shared<cv_wl_core>();
         if (!cv_core)
-            CV_ErrorNoReturn(StsNoMem, "Couldn't allocate enough memory");
+            CV_Error(StsNoMem, "Couldn't allocate enough memory");
 
         cv_core->init();
     }
